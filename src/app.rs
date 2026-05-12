@@ -697,25 +697,34 @@ impl eframe::App for AppState {
         let side_frame = egui::Frame::side_top_panel(&ctx.style())
             .inner_margin(egui::Margin::symmetric(12, 10));
 
-        // Left side: settings on top, workspace+RUN on the bottom.
+        // Left side: workspace at top, vfill, settings at bottom.
         egui::SidePanel::left("left-side")
             .resizable(true)
             .default_width(340.0)
             .frame(side_frame)
             .show(ctx, |ui| {
                 let avail = ui.available_height();
-                let workspace_h = (avail * 0.42).clamp(220.0, 400.0);
-                egui::TopBottomPanel::bottom("workspace-panel")
+                let ws_h = (avail * 0.42).clamp(220.0, 400.0);
+                egui::TopBottomPanel::top("workspace-panel")
                     .resizable(false)
-                    .exact_height(workspace_h)
+                    .height_range(0.0..=ws_h)
                     .frame(egui::Frame::side_top_panel(&ctx.style())
                         .inner_margin(egui::Margin::symmetric(4, 8)))
                     .show_inside(ui, |ui| {
                         self.workspace_panel(ui);
                     });
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    self.settings_panel(ui);
-                });
+                
+                let remaining = ui.available_height();
+                egui::TopBottomPanel::bottom("settings-panel")
+                    .resizable(false)
+                    .height_range(0.0..=remaining)
+                    .frame(egui::Frame::side_top_panel(&ctx.style())
+                        .inner_margin(egui::Margin::symmetric(4, 8)))
+                    .show_inside(ui, |ui| {
+                        egui::ScrollArea::vertical().show(ui, |ui| {
+                            self.settings_panel(ui);
+                        });
+                    });
             });
 
         // Right side: results + export.
@@ -922,119 +931,125 @@ impl AppState {
                 }
             });
         });
-        ui.add_space(8.0);
     }
 
     fn results_panel(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(4.0);
+        // ---- Viewer (top) ----
+        let viewer_h = 100.0;
+        egui::TopBottomPanel::top("viewer-panel")
+            .resizable(false)
+            .height_range(0.0..=viewer_h)
+            .show_inside(ui, |ui| {
+                ui.add_space(4.0);
+                ui.heading("Viewer");
+                ui.separator();
 
-        // ---- Viewer ----
-        ui.heading("Viewer");
-        ui.separator();
-
-        let mut focus_change: Option<usize> = None;
-        ui.horizontal(|ui| {
-            ui.label("Folder");
-            let current_name = self
-                .focused_result
-                .and_then(|i| self.results_list.get(i))
-                .map(|r| r.name.clone())
-                .unwrap_or_else(|| "(none)".into());
-            egui::ComboBox::from_id_salt("viewer-folder")
-                .selected_text(current_name)
-                .width(ui.available_width().min(180.0))
-                .show_ui(ui, |ui| {
-                    if self.results_list.is_empty() {
-                        ui.label(egui::RichText::new("no analyzed folders").italics().weak());
-                    }
-                    for (i, r) in self.results_list.iter().enumerate() {
-                        let selected = self.focused_result == Some(i);
-                        if ui.selectable_label(selected, &r.name).clicked() {
-                            focus_change = Some(i);
-                        }
-                    }
+                let mut focus_change: Option<usize> = None;
+                ui.horizontal(|ui| {
+                    ui.label("Folder");
+                    let current_name = self
+                        .focused_result
+                        .and_then(|i| self.results_list.get(i))
+                        .map(|r| r.name.clone())
+                        .unwrap_or_else(|| "(none)".into());
+                    egui::ComboBox::from_id_salt("viewer-folder")
+                        .selected_text(current_name)
+                        .width(ui.available_width().min(180.0))
+                        .show_ui(ui, |ui| {
+                            if self.results_list.is_empty() {
+                                ui.label(egui::RichText::new("no analyzed folders").italics().weak());
+                            }
+                            for (i, r) in self.results_list.iter().enumerate() {
+                                let selected = self.focused_result == Some(i);
+                                if ui.selectable_label(selected, &r.name).clicked() {
+                                    focus_change = Some(i);
+                                }
+                            }
+                        });
                 });
-        });
-        ui.checkbox(&mut self.bw_mode, "B&W mode");
-        ui.checkbox(&mut self.show_overlays, "Show overlays");
+                ui.checkbox(&mut self.bw_mode, "B&W mode");
+                ui.checkbox(&mut self.show_overlays, "Show overlays");
 
-        if let Some(i) = focus_change {
-            self.focused_result = Some(i);
-            self.current_frame = 0;
-            self.texture = None;
-            self.texture_for = None;
-            self.zoom = 1.0;
-            self.pan = Vec2::ZERO;
-        }
-
-        ui.add_space(10.0);
-
-        // ---- Results ----
-        ui.heading("Results");
-        ui.separator();
-
-        let avail_h = ui.available_height();
-        let list_h = (avail_h - 80.0).max(120.0);
-
-        egui::ScrollArea::vertical()
-            .id_salt("results-list")
-            .max_height(list_h)
-            .show(ui, |ui| {
-                if self.results_list.is_empty() {
-                    ui.label(egui::RichText::new("(no results yet)").italics().weak());
-                }
-                for r in self.results_list.iter_mut() {
-                    ui.horizontal(|ui| {
-                        ui.checkbox(&mut r.visible, "")
-                            .on_hover_text("Include in export");
-                        ui.label(egui::RichText::new(&r.name).strong());
-                    });
-                    let n_static = r.results.frames.iter()
-                        .flat_map(|f| f.bubbles.iter())
-                        .filter(|b| b.is_static)
-                        .count();
-                    ui.label(
-                        egui::RichText::new(format!(
-                            "  frames: {}, bubbles: {}, rejected: {}, static: {}",
-                            r.results.frames.len(),
-                            r.results.total_bubbles(),
-                            r.results.total_rejected(),
-                            n_static,
-                        ))
-                        .small()
-                        .monospace(),
-                    );
-                    let diams = r.results.diameters_valid();
-                    if !diams.is_empty() {
-                        let mean: f32 = diams.iter().sum::<f32>() / diams.len() as f32;
-                        let mut sorted = diams.clone();
-                        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                        let median = sorted[sorted.len() / 2];
-                        ui.label(
-                            egui::RichText::new(format!(
-                                "  mean: {:.2} μm, median: {:.2} μm", mean, median,
-                            ))
-                            .small()
-                            .monospace(),
-                        );
-                    }
-                    ui.separator();
+                if let Some(i) = focus_change {
+                    self.focused_result = Some(i);
+                    self.current_frame = 0;
+                    self.texture = None;
+                    self.texture_for = None;
+                    self.zoom = 1.0;
+                    self.pan = Vec2::ZERO;
                 }
             });
 
-        ui.add_space(12.0);
-        let can_export =
-            self.results_list.iter().any(|r| r.visible) && !self.in_progress;
-        ui.vertical_centered(|ui| {
-            let btn_w = (ui.available_width() * 0.7).clamp(140.0, 220.0);
-            let btn = egui::Button::new(egui::RichText::new("Export…").strong().size(15.0))
-                .min_size(Vec2::new(btn_w, 32.0));
-            if ui.add_enabled(can_export, btn).clicked() {
-                self.export_visible_results();
-            }
-        });
-        ui.add_space(6.0);
+        // ---- Results (bottom) ----
+        let remaining = ui.available_height();
+        let results_h = (remaining - 40.0).max(140.0);
+        egui::TopBottomPanel::bottom("results-bottom-panel")
+            .resizable(false)
+            .height_range(0.0..=results_h)
+            .show_inside(ui, |ui| {
+                ui.heading("Results");
+                ui.separator();
+
+                egui::ScrollArea::vertical()
+                    .id_salt("results-list")
+                    .show(ui, |ui| {
+                        if self.results_list.is_empty() {
+                            ui.label(egui::RichText::new("(no results yet)").italics().weak());
+                        }
+                        for r in self.results_list.iter_mut() {
+                            ui.horizontal(|ui| {
+                                ui.checkbox(&mut r.visible, "")
+                                    .on_hover_text("Include in export");
+                                ui.label(egui::RichText::new(&r.name).strong());
+                            });
+                            let n_static = r.results.frames.iter()
+                                .flat_map(|f| f.bubbles.iter())
+                                .filter(|b| b.is_static)
+                                .count();
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "  frames: {}, bubbles: {}, rejected: {}, static: {}",
+                                    r.results.frames.len(),
+                                    r.results.total_bubbles(),
+                                    r.results.total_rejected(),
+                                    n_static,
+                                ))
+                                .small()
+                                .monospace(),
+                            );
+                            let diams = r.results.diameters_valid();
+                            if !diams.is_empty() {
+                                let mean: f32 = diams.iter().sum::<f32>() / diams.len() as f32;
+                                let mut sorted = diams.clone();
+                                sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                                let median = sorted[sorted.len() / 2];
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "  mean: {:.2} μm, median: {:.2} μm", mean, median,
+                                    ))
+                                    .small()
+                                    .monospace(),
+                                );
+                            }
+                            ui.separator();
+                        }
+                    });
+
+                ui.add_space(8.0);
+                let can_export =
+                    self.results_list.iter().any(|r| r.visible) && !self.in_progress;
+                ui.vertical_centered(|ui| {
+                    let btn_w = (ui.available_width() * 0.7).clamp(140.0, 220.0);
+                    let btn = egui::Button::new(egui::RichText::new("Export…").strong().size(15.0))
+                        .min_size(Vec2::new(btn_w, 32.0));
+                    if ui.add_enabled(can_export, btn).clicked() {
+                        self.export_visible_results();
+                    }
+                });
+                ui.add_space(6.0);
+            });
     }
+
 
     fn center_panel(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let focus_idx = self.focused_result;
