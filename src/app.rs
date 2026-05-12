@@ -126,7 +126,7 @@ impl AppState {
             imgsz: INPUT_SIZE,
             iou: 0.45,
             max_det: 1000,
-            reject_static: false,
+            reject_static: true,
             static_cfg: StaticFilterConfig::default(),
 
             results: None,
@@ -641,7 +641,7 @@ impl AppState {
 
         // ---- Static dirt panel
         egui::CollapsingHeader::new("Static dirt rejection")
-            .default_open(false)
+            .default_open(true)
             .show(ui, |ui| {
                 ui.checkbox(&mut self.reject_static, "Reject persistent locations");
                 ui.horizontal(|ui| {
