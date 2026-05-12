@@ -1098,7 +1098,6 @@ impl AppState {
         let painter = ui.painter();
         let bg = ui.visuals().extreme_bg_color;
         let bar_col = ui.visuals().widgets.inactive.fg_stroke.color;
-        let axis_col = ui.visuals().weak_text_color();
 
         painter.rect_filled(rect, 2.0, bg);
 
@@ -1115,11 +1114,10 @@ impl AppState {
             counts[idx] += 1;
         }
         let max_count = *counts.iter().max().unwrap_or(&1) as f32;
-        let (min_d, max_d) = (axis_min, axis_max);
 
-        let plot_h = rect.height() - 12.0;
         let plot_top = rect.top() + 4.0;
-        let plot_bot = plot_top + plot_h;
+        let plot_bot = rect.bottom() - 4.0;
+        let plot_h = plot_bot - plot_top;
         let plot_left = rect.left() + 4.0;
         let plot_right = rect.right() - 4.0;
         let plot_w = plot_right - plot_left;
@@ -1137,28 +1135,30 @@ impl AppState {
                 bar_col,
             );
         }
-
-        // Axis labels (min, max μm) along the bottom
-        let label_y = rect.bottom() - 2.0;
-        painter.text(
-            Pos2::new(plot_left, label_y),
-            egui::Align2::LEFT_BOTTOM,
-            format!("{:.1}", min_d),
-            egui::FontId::monospace(9.0),
-            axis_col,
-        );
-        painter.text(
-            Pos2::new(plot_right, label_y),
-            egui::Align2::RIGHT_BOTTOM,
-            format!("{:.1} μm", max_d),
-            egui::FontId::monospace(9.0),
-            axis_col,
-        );
     }
 
     fn results_panel(&mut self, ui: &mut egui::Ui) {
         ui.add_space(4.0);
-        ui.heading("Results");
+        ui.horizontal(|ui| {
+            ui.heading("Results");
+            ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
+                let has_any = !self.results_list.is_empty();
+                if ui
+                    .add_enabled(has_any, egui::Button::new("×"))
+                    .on_hover_text("Clear all results")
+                    .clicked()
+                {
+                    self.results_list.clear();
+                    self.focused_result = None;
+                    self.texture = None;
+                    self.texture_for = None;
+                    self.current_frame = 0;
+                    self.zoom = 1.0;
+                    self.pan = Vec2::ZERO;
+                    self.status = "Results cleared.".into();
+                }
+            });
+        });
         ui.separator();
 
         // Viewer checkboxes
@@ -1285,7 +1285,7 @@ impl AppState {
                                 if !sorted.is_empty() {
                                     ui.add_space(4.0);
                                     let hist_w = ui.available_width();
-                                    let hist_h = 64.0_f32;
+                                    let hist_h = 52.0_f32;
                                     let (rect, _resp) = ui.allocate_exact_size(
                                         Vec2::new(hist_w, hist_h),
                                         Sense::hover(),
@@ -1293,6 +1293,34 @@ impl AppState {
                                     Self::draw_mini_histogram(
                                         ui, rect, &sorted, global_min, global_max,
                                     );
+                                    ui.horizontal(|ui| {
+                                        ui.add(
+                                            egui::Label::new(
+                                                egui::RichText::new(format!("{:.1}", global_min))
+                                                    .small()
+                                                    .monospace()
+                                                    .weak(),
+                                            )
+                                            .truncate(),
+                                        );
+                                        ui.with_layout(
+                                            Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                ui.add(
+                                                    egui::Label::new(
+                                                        egui::RichText::new(format!(
+                                                            "{:.1} μm",
+                                                            global_max,
+                                                        ))
+                                                        .small()
+                                                        .monospace()
+                                                        .weak(),
+                                                    )
+                                                    .truncate(),
+                                                );
+                                            },
+                                        );
+                                    });
                                 }
 
                                 if is_focused {
@@ -1667,7 +1695,7 @@ impl AppState {
                                 ui.label(egui::RichText::new("Running Inference").heading().strong());
                                 ui.add_space(8.0);
                                 ui.label(format!(
-                                    "{}/{} folder · {}/{} frame",
+                                    "{}/{} folders · {}/{} frames",
                                     p.folder_idx + 1, p.folder_total,
                                     p.frame_idx + 1, p.frame_total,
                                 ));
