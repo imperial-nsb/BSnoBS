@@ -782,27 +782,23 @@ impl eframe::App for AppState {
             .default_width(340.0)
             .frame(side_frame)
             .show(ctx, |ui| {
-                let avail = ui.available_height();
-                let ws_h = (avail * 0.42).clamp(220.0, 400.0);
-                egui::TopBottomPanel::top("workspace-panel")
-                    .resizable(false)
-                    .height_range(0.0..=ws_h)
-                    .frame(egui::Frame::side_top_panel(&ctx.style())
-                        .inner_margin(egui::Margin::symmetric(4, 8)))
-                    .show_inside(ui, |ui| {
-                        self.workspace_panel(ui);
-                    });
-                
-                let remaining = ui.available_height();
+                let max_settings_h = (ui.available_height() - 250.0).max(100.0);
                 egui::TopBottomPanel::bottom("settings-panel")
                     .resizable(false)
-                    .height_range(0.0..=remaining)
+                    .height_range(0.0..=max_settings_h)
                     .frame(egui::Frame::side_top_panel(&ctx.style())
                         .inner_margin(egui::Margin::symmetric(4, 8)))
                     .show_inside(ui, |ui| {
                         egui::ScrollArea::vertical().show(ui, |ui| {
                             self.settings_panel(ui);
                         });
+                    });
+
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::side_top_panel(&ctx.style())
+                        .inner_margin(egui::Margin::symmetric(4, 8)))
+                    .show_inside(ui, |ui| {
+                        self.workspace_panel(ui);
                     });
             });
 
