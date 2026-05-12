@@ -84,6 +84,7 @@ pub struct AppState {
     texture: Option<TextureHandle>,
     texture_for: Option<(usize, usize)>, // (result idx, frame idx)
     zoom: f32,
+    pan: Vec2,
 
     // Worker
     worker_rx: Option<mpsc::Receiver<WorkerMsg>>,
@@ -172,6 +173,7 @@ impl AppState {
             texture: None,
             texture_for: None,
             zoom: 1.0,
+            pan: Vec2::ZERO,
 
             worker_rx: None,
             in_progress: false,
@@ -991,6 +993,8 @@ impl AppState {
                     self.current_frame = 0;
                     self.texture = None;
                     self.texture_for = None;
+                    self.zoom = 1.0;
+                    self.pan = Vec2::ZERO;
                 }
             });
 
@@ -1026,7 +1030,7 @@ impl AppState {
             );
             if ui.button("−").clicked() { self.zoom = (self.zoom * 0.8).max(0.1); }
             if ui.button("+").clicked() { self.zoom = (self.zoom * 1.25).min(10.0); }
-            if ui.button("Fit").clicked() { self.zoom = 1.0; }
+            if ui.button("Fit").clicked() { self.zoom = 1.0; self.pan = Vec2::ZERO; }
             ui.separator();
             if let Some(r) = self.focused_results() {
                 ui.label(format!("{}  ({} frames)", r.name, r.results.frames.len()));
@@ -1040,9 +1044,35 @@ impl AppState {
         let slider_h = 32.0;
         let total = ui.available_size();
         let image_size = Vec2::new(total.x, (total.y - slider_h - 4.0).max(50.0));
-        let (image_rect, _) = ui.allocate_exact_size(image_size, Sense::hover());
+        let (image_rect, image_resp) =
+            ui.allocate_exact_size(image_size, Sense::click_and_drag());
 
         self.ensure_frame_texture(ctx);
+
+        // ---- Interaction: scroll-zoom around cursor, drag to pan,
+        //      double-click to reset ----
+        if image_resp.hovered() {
+            let (raw_scroll, modifiers) =
+                ui.input(|i| (i.smooth_scroll_delta, i.modifiers));
+            if raw_scroll.y.abs() > 0.0 {
+                let pivot = ui.input(|i| i.pointer.hover_pos())
+                    .unwrap_or(image_rect.center());
+                let step = if modifiers.shift_only() { 0.002 } else { 0.005 };
+                let factor = (raw_scroll.y * step).exp();
+                let new_zoom = (self.zoom * factor).clamp(0.1, 20.0);
+                let r = new_zoom / self.zoom;
+                let v = pivot - image_rect.center();
+                self.pan = v * (1.0 - r) + self.pan * r;
+                self.zoom = new_zoom;
+            }
+        }
+        if image_resp.dragged() {
+            self.pan += image_resp.drag_delta();
+        }
+        if image_resp.double_clicked() {
+            self.zoom = 1.0;
+            self.pan = Vec2::ZERO;
+        }
 
         let painter = ui.painter_at(image_rect);
         painter.rect_filled(image_rect, 0.0, Color32::from_gray(20));
@@ -1056,11 +1086,9 @@ impl AppState {
                         (image_rect.width() / img_size.x).min(image_rect.height() / img_size.y);
                     let scale = fit_scale * self.zoom;
                     let disp = img_size * scale;
-                    let pos = Pos2::new(
-                        image_rect.center().x - disp.x * 0.5,
-                        image_rect.center().y - disp.y * 0.5,
-                    );
-                    let target_rect = Rect::from_min_size(pos, disp);
+                    let center = image_rect.center() + self.pan;
+                    let target_rect =
+                        Rect::from_center_size(Pos2::new(center.x, center.y), disp);
                     painter.image(
                         tex.id(),
                         target_rect,
