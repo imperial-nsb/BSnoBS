@@ -75,7 +75,6 @@ pub struct AppState {
 
     // Workspace + results
     workspace: Vec<WorkspaceEntry>,
-    workspace_selected: Option<usize>,
     results_list: Vec<ResultEntry>,
     focused_result: Option<usize>,
 
@@ -165,7 +164,6 @@ impl AppState {
             last_settings: None,
 
             workspace: Vec::new(),
-            workspace_selected: None,
             results_list: Vec::new(),
             focused_result: None,
 
@@ -360,21 +358,7 @@ impl AppState {
                 image_files: files,
                 run_enabled: true,
             });
-            if self.workspace_selected.is_none() {
-                self.workspace_selected = Some(self.workspace.len() - 1);
-            }
         }
-    }
-
-    fn remove_selected_folder(&mut self) {
-        let Some(i) = self.workspace_selected else { return };
-        if i >= self.workspace.len() { return; }
-        self.workspace.remove(i);
-        self.workspace_selected = if self.workspace.is_empty() {
-            None
-        } else {
-            Some(i.min(self.workspace.len() - 1))
-        };
     }
 
     // ------------- Run -------------
@@ -868,9 +852,6 @@ impl AppState {
         ui.horizontal(|ui| {
             ui.heading("Workspace");
             ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("−").on_hover_text("Remove selected").clicked() {
-                    self.remove_selected_folder();
-                }
                 if ui.button("+").on_hover_text("Add folder…").clicked() {
                     self.add_folder();
                 }
@@ -879,6 +860,7 @@ impl AppState {
         ui.separator();
 
         let list_h = (ui.available_height() - 48.0).max(60.0);
+        let mut remove_idx: Option<usize> = None;
         egui::ScrollArea::vertical()
             .id_salt("workspace-list")
             .max_height(list_h)
@@ -886,26 +868,21 @@ impl AppState {
                 if self.workspace.is_empty() {
                     ui.label(egui::RichText::new("(no folders — click +)").italics().weak());
                 }
-                let mut select_idx: Option<usize> = None;
                 for (i, w) in self.workspace.iter_mut().enumerate() {
-                    let row = ui.horizontal(|ui| {
+                    ui.horizontal(|ui| {
                         ui.checkbox(&mut w.run_enabled, "");
-                        let selected = self.workspace_selected == Some(i);
-                        let resp = ui.selectable_label(
-                            selected,
-                            format!("{}  ({})", w.name, w.image_files.len()),
-                        );
-                        if resp.clicked() {
-                            select_idx = Some(i);
-                        }
-                        resp
+                        ui.label(format!("{}  ({})", w.name, w.image_files.len()));
+                        ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.small_button("×").on_hover_text("Remove").clicked() {
+                                remove_idx = Some(i);
+                            }
+                        });
                     });
-                    let _ = row;
-                }
-                if let Some(i) = select_idx {
-                    self.workspace_selected = Some(i);
                 }
             });
+        if let Some(i) = remove_idx {
+            self.workspace.remove(i);
+        }
 
         ui.add_space(10.0);
         let can_run = self.analyzer.is_some()
