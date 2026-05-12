@@ -1464,7 +1464,7 @@ impl AppState {
         }
 
         let painter = ui.painter_at(image_rect);
-        painter.rect_filled(image_rect, 0.0, Color32::from_gray(20));
+        painter.rect_filled(image_rect, 0.0, ui.visuals().extreme_bg_color);
 
 
 
@@ -1587,7 +1587,7 @@ impl AppState {
                     "Click a result block on the right to view it."
                 },
                 egui::FontId::proportional(16.0),
-                Color32::from_gray(180),
+                ui.visuals().weak_text_color(),
             );
         }
 
