@@ -780,6 +780,7 @@ impl eframe::App for AppState {
         egui::SidePanel::left("left-side")
             .resizable(true)
             .default_width(340.0)
+            .width_range(220.0..=480.0)
             .frame(side_frame)
             .show(ctx, |ui| {
                 let max_settings_h = (ui.available_height() - 250.0).max(100.0);
@@ -983,9 +984,10 @@ impl AppState {
 
         let list_h = (ui.available_height() - 48.0).max(60.0);
         let mut remove_idx: Option<usize> = None;
-        egui::ScrollArea::vertical()
+        egui::ScrollArea::both()
             .id_salt("workspace-list")
             .max_height(list_h)
+            .auto_shrink([false, false])
             .show(ui, |ui| {
                 if self.workspace.is_empty() {
                     ui.label(egui::RichText::new("(no folders — click +)").italics().weak());
@@ -1025,128 +1027,125 @@ impl AppState {
     }
 
     fn results_panel(&mut self, ui: &mut egui::Ui) {
-        // ---- Viewer (top) ----
-        let viewer_h = 200.0;
-        egui::TopBottomPanel::top("viewer-panel")
-            .resizable(false)
-            .height_range(0.0..=viewer_h)
-            .show_inside(ui, |ui| {
-                ui.add_space(4.0);
-                ui.heading("Viewer");
-                ui.separator();
+        ui.add_space(4.0);
+        ui.heading("Results");
+        ui.separator();
 
-                let mut focus_change: Option<usize> = None;
-                ui.horizontal(|ui| {
-                    ui.label("Folder");
-                    let current_name = self
-                        .focused_result
-                        .and_then(|i| self.results_list.get(i))
-                        .map(|r| r.name.clone())
-                        .unwrap_or_else(|| "(none)".into());
-                    egui::ComboBox::from_id_salt("viewer-folder")
-                        .selected_text(current_name)
-                        .width(ui.available_width().min(180.0))
-                        .show_ui(ui, |ui| {
-                            if self.results_list.is_empty() {
-                                ui.label(egui::RichText::new("no analyzed folders").italics().weak());
-                            }
-                            for (i, r) in self.results_list.iter().enumerate() {
-                                let selected = self.focused_result == Some(i);
-                                if ui.selectable_label(selected, &r.name).clicked() {
-                                    focus_change = Some(i);
-                                }
-                            }
-                        });
-                });
-                ui.checkbox(&mut self.bw_mode, "B&W mode");
-                ui.checkbox(&mut self.show_overlays, "Show overlays");
-                ui.add_enabled_ui(self.show_overlays, |ui| {
-                    ui.indent("overlay-sub", |ui| {
-                        ui.checkbox(&mut self.show_bubbles, "Accepted");
-                        ui.checkbox(&mut self.show_rejected, "Rejected");
-                        ui.checkbox(&mut self.show_static, "Static");
-                    });
-                });
-
-
-                if let Some(i) = focus_change {
-                    self.focused_result = Some(i);
-                    self.current_frame = 0;
-                    self.texture = None;
-                    self.texture_for = None;
-                    self.zoom = 1.0;
-                    self.pan = Vec2::ZERO;
-                }
+        // Viewer checkboxes
+        ui.checkbox(&mut self.bw_mode, "B&W mode");
+        ui.checkbox(&mut self.show_overlays, "Show overlays");
+        ui.add_enabled_ui(self.show_overlays, |ui| {
+            ui.indent("overlay-sub", |ui| {
+                ui.checkbox(&mut self.show_bubbles, "Accepted");
+                ui.checkbox(&mut self.show_rejected, "Rejected");
+                ui.checkbox(&mut self.show_static, "Static");
             });
+        });
+        ui.separator();
 
-        // ---- Results (bottom) ----
-        let remaining = ui.available_height();
-        let results_h = (remaining - 40.0).max(140.0);
-        egui::TopBottomPanel::bottom("results-bottom-panel")
-            .resizable(false)
-            .height_range(0.0..=results_h)
-            .show_inside(ui, |ui| {
-                ui.heading("Results");
-                ui.separator();
+        // Result blocks
+        let mut focus_change: Option<usize> = None;
+        let results_h = (ui.available_height() - 54.0).max(80.0);
+        egui::ScrollArea::vertical()
+            .id_salt("results-list")
+            .max_height(results_h)
+            .show(ui, |ui| {
+                if self.results_list.is_empty() {
+                    ui.label(egui::RichText::new("(no results yet)").italics().weak());
+                }
+                let focused = self.focused_result;
+                for (i, r) in self.results_list.iter_mut().enumerate() {
+                    let is_focused = focused == Some(i);
+                    let stroke = if is_focused {
+                        egui::Stroke::new(2.0, egui::Color32::from_rgb(70, 140, 220))
+                    } else {
+                        egui::Stroke::NONE
+                    };
+                    let frame = egui::Frame::new()
+                        .stroke(stroke)
+                        .inner_margin(egui::Margin::same(6))
+                        .outer_margin(egui::Margin::symmetric(0, 2))
+                        .corner_radius(egui::CornerRadius::same(4));
 
-                egui::ScrollArea::vertical()
-                    .id_salt("results-list")
-                    .show(ui, |ui| {
-                        if self.results_list.is_empty() {
-                            ui.label(egui::RichText::new("(no results yet)").italics().weak());
-                        }
-                        for r in self.results_list.iter_mut() {
-                            ui.horizontal(|ui| {
-                                ui.checkbox(&mut r.visible, "")
-                                    .on_hover_text("Include in export");
+                    let resp = frame.show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            // Left: name + stats
+                            ui.vertical(|ui| {
                                 ui.label(egui::RichText::new(&r.name).strong());
-                            });
-                            let n_static = r.results.frames.iter()
-                                .flat_map(|f| f.bubbles.iter())
-                                .filter(|b| b.is_static)
-                                .count();
-                            ui.label(
-                                egui::RichText::new(format!(
-                                    "  frames: {}, bubbles: {}, rejected: {}, static: {}",
-                                    r.results.frames.len(),
-                                    r.results.total_bubbles(),
-                                    r.results.total_rejected(),
-                                    n_static,
-                                ))
-                                .small()
-                                .monospace(),
-                            );
-                            let diams = r.results.diameters_valid();
-                            if !diams.is_empty() {
-                                let mean: f32 = diams.iter().sum::<f32>() / diams.len() as f32;
-                                let mut sorted = diams.clone();
-                                sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                                let median = sorted[sorted.len() / 2];
+                                let n_static = r.results.frames.iter()
+                                    .flat_map(|f| f.bubbles.iter())
+                                    .filter(|b| b.is_static)
+                                    .count();
                                 ui.label(
                                     egui::RichText::new(format!(
-                                        "  mean: {:.2} μm, median: {:.2} μm", mean, median,
+                                        "frames: {}  bubbles: {}  rejected: {}  static: {}",
+                                        r.results.frames.len(),
+                                        r.results.total_bubbles(),
+                                        r.results.total_rejected(),
+                                        n_static,
                                     ))
                                     .small()
                                     .monospace(),
                                 );
-                            }
-                            ui.separator();
-                        }
+                                let diams = r.results.diameters_valid();
+                                if !diams.is_empty() {
+                                    let mean: f32 = diams.iter().sum::<f32>() / diams.len() as f32;
+                                    let mut sorted = diams.clone();
+                                    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                                    let median = sorted[sorted.len() / 2];
+                                    ui.label(
+                                        egui::RichText::new(format!(
+                                            "mean: {:.2} μm  median: {:.2} μm", mean, median,
+                                        ))
+                                        .small()
+                                        .monospace(),
+                                    );
+                                }
+                            });
+                            // Right: export checkbox
+                            ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.checkbox(&mut r.visible, "")
+                                    .on_hover_text("Include in export");
+                            });
+                        });
                     });
 
-                ui.add_space(8.0);
-                let can_export =
-                    self.results_list.iter().any(|r| r.visible) && !self.in_progress;
-                ui.vertical_centered(|ui| {
-                    let btn_w = (ui.available_width() * 0.7).clamp(140.0, 220.0);
-                    let btn = egui::Button::new(egui::RichText::new("Export…").strong().size(15.0))
-                        .min_size(Vec2::new(btn_w, 32.0));
-                    if ui.add_enabled(can_export, btn).clicked() {
-                        self.export_visible_results();
+                    // Whole-block hover + click to focus
+                    let block_resp = ui.interact(
+                        resp.response.rect,
+                        ui.id().with(("result-block", i)),
+                        egui::Sense::click(),
+                    );
+                    if block_resp.hovered() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                     }
-                });
-                ui.add_space(6.0);
+                    if block_resp.clicked() {
+                        focus_change = Some(i);
+                    }
+                    ui.separator();
+                }
             });
+
+        if let Some(i) = focus_change {
+            self.focused_result = Some(i);
+            self.current_frame = 0;
+            self.texture = None;
+            self.texture_for = None;
+            self.zoom = 1.0;
+            self.pan = Vec2::ZERO;
+        }
+
+        ui.add_space(8.0);
+        let can_export = self.results_list.iter().any(|r| r.visible) && !self.in_progress;
+        ui.vertical_centered(|ui| {
+            let btn_w = (ui.available_width() * 0.7).clamp(140.0, 220.0);
+            let btn = egui::Button::new(egui::RichText::new("Export…").strong().size(15.0))
+                .min_size(Vec2::new(btn_w, 32.0));
+            if ui.add_enabled(can_export, btn).clicked() {
+                self.export_visible_results();
+            }
+        });
+        ui.add_space(6.0);
     }
 
 
@@ -1172,8 +1171,6 @@ impl AppState {
             ui.separator();
             if let Some(r) = self.focused_results() {
                 ui.label(format!("{}  ({} frames)", r.name, r.results.frames.len()));
-            } else {
-                ui.label(egui::RichText::new("no result selected").italics().weak());
             }
             ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
                 let has_results = self.focused_result
@@ -1370,7 +1367,7 @@ impl AppState {
                 if self.results_list.is_empty() {
                     "Add folders to the workspace, then click RUN."
                 } else {
-                    "Pick a result on the right to view it."
+                    "Click a result block on the right to view it."
                 },
                 egui::FontId::proportional(16.0),
                 Color32::from_gray(180),
