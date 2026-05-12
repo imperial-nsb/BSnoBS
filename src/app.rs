@@ -86,6 +86,8 @@ pub struct AppState {
     pan: Vec2,
     bw_mode: bool,
     show_overlays: bool,
+    edit_mode: bool,
+    hovered_bubble: Option<usize>, // bubble index within current frame
 
     // Worker
     worker_rx: Option<mpsc::Receiver<WorkerMsg>>,
@@ -176,6 +178,8 @@ impl AppState {
             pan: Vec2::ZERO,
             bw_mode: false,
             show_overlays: true,
+            edit_mode: false,
+            hovered_bubble: None,
 
             worker_rx: None,
             in_progress: false,
@@ -919,7 +923,7 @@ impl AppState {
 
     fn results_panel(&mut self, ui: &mut egui::Ui) {
         // ---- Viewer (top) ----
-        let viewer_h = 100.0;
+        let viewer_h = 200.0;
         egui::TopBottomPanel::top("viewer-panel")
             .resizable(false)
             .height_range(0.0..=viewer_h)
@@ -953,6 +957,13 @@ impl AppState {
                 });
                 ui.checkbox(&mut self.bw_mode, "B&W mode");
                 ui.checkbox(&mut self.show_overlays, "Show overlays");
+                let has_results = self.focused_result
+                    .and_then(|i| self.results_list.get(i))
+                    .map(|r| !r.results.frames.is_empty())
+                    .unwrap_or(false);
+                ui.add_enabled_ui(has_results, |ui| {
+                    ui.checkbox(&mut self.edit_mode, "✏ Edit mode");
+                });
 
                 if let Some(i) = focus_change {
                     self.focused_result = Some(i);
@@ -1067,42 +1078,49 @@ impl AppState {
         let slider_h = 32.0;
         let total = ui.available_size();
         let image_size = Vec2::new(total.x, (total.y - slider_h - 4.0).max(50.0));
+        let sense = if self.edit_mode {
+            Sense::click_and_drag() | Sense::hover()
+        } else {
+            Sense::click_and_drag()
+        };
         let (image_rect, image_resp) =
-            ui.allocate_exact_size(image_size, Sense::click_and_drag());
+            ui.allocate_exact_size(image_size, sense);
 
         self.ensure_frame_texture(ctx);
 
         // ---- Interaction: scroll-zoom around cursor, drag to pan,
         //      double-click to reset ----
-        if image_resp.hovered() {
-            let (raw_scroll, zoom_delta, modifiers, pointer) = ui.input(|i| (
-                i.smooth_scroll_delta,
-                i.zoom_delta(),
-                i.modifiers,
-                i.pointer.hover_pos(),
-            ));
-            let scroll_factor = if raw_scroll.y.abs() > 0.0 {
-                let step = if modifiers.shift_only() { 0.002 } else { 0.005 };
-                (raw_scroll.y * step).exp()
-            } else {
-                1.0
-            };
-            let factor = scroll_factor * zoom_delta;
-            if (factor - 1.0).abs() > 1e-4 {
-                let pivot = pointer.unwrap_or(image_rect.center());
-                let new_zoom = (self.zoom * factor).clamp(0.2, 8.0);
-                let r = new_zoom / self.zoom;
-                let v = pivot - image_rect.center();
-                self.pan = v * (1.0 - r) + self.pan * r;
-                self.zoom = new_zoom;
+        if !self.edit_mode {
+            if image_resp.hovered() {
+                let (raw_scroll, zoom_delta, modifiers, pointer) = ui.input(|i| (
+                    i.smooth_scroll_delta,
+                    i.zoom_delta(),
+                    i.modifiers,
+                    i.pointer.hover_pos(),
+                ));
+                let scroll_factor = if raw_scroll.y.abs() > 0.0 {
+                    let step = if modifiers.shift_only() { 0.002 } else { 0.005 };
+                    (raw_scroll.y * step).exp()
+                } else {
+                    1.0
+                };
+                let factor = scroll_factor * zoom_delta;
+                if (factor - 1.0).abs() > 1e-4 {
+                    let pivot = pointer.unwrap_or(image_rect.center());
+                    let new_zoom = (self.zoom * factor).clamp(0.2, 8.0);
+                    let r = new_zoom / self.zoom;
+                    let v = pivot - image_rect.center();
+                    self.pan = v * (1.0 - r) + self.pan * r;
+                    self.zoom = new_zoom;
+                }
             }
-        }
-        if image_resp.dragged() {
-            self.pan += image_resp.drag_delta();
-        }
-        if image_resp.double_clicked() {
-            self.zoom = 1.0;
-            self.pan = Vec2::ZERO;
+            if image_resp.dragged() {
+                self.pan += image_resp.drag_delta();
+            }
+            if image_resp.double_clicked() {
+                self.zoom = 1.0;
+                self.pan = Vec2::ZERO;
+            }
         }
 
         let painter = ui.painter_at(image_rect);
@@ -1133,7 +1151,57 @@ impl AppState {
                             scale,
                             frame,
                             res.results.parameters.scale_um_per_pixel,
+                            self.edit_mode,
+                            self.hovered_bubble,
                         );
+                    }
+
+                    // ---- Edit mode: hit-test + highlight + click-to-remove ----
+                    if self.edit_mode {
+                        let um_per_pixel = res.results.parameters.scale_um_per_pixel;
+                        let pointer = ui.input(|i| i.pointer.hover_pos());
+                        let mut closest: Option<(usize, f32)> = None;
+                        if let Some(mp) = pointer {
+                            if image_rect.contains(mp) {
+                                let origin = target_rect.min;
+                                for (bi, b) in frame.bubbles.iter().enumerate() {
+                                    let cx = origin.x + b.centroid_x * scale;
+                                    let cy = origin.y + b.centroid_y * scale;
+                                    let r_px = (b.diameter_um / 2.0) / um_per_pixel;
+                                    let r_screen = r_px * scale;
+                                    let dist = ((mp.x - cx).powi(2) + (mp.y - cy).powi(2)).sqrt();
+                                    if dist <= r_screen.max(8.0) {
+                                        if closest.is_none() || dist < closest.unwrap().1 {
+                                            closest = Some((bi, dist));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        self.hovered_bubble = closest.map(|(i, _)| i);
+
+                        if image_resp.clicked() {
+                            if let Some(bi) = self.hovered_bubble {
+                                // Remove the bubble from results
+                                if let Some(res) = self.results_list.get_mut(focus_idx) {
+                                    let frame = &mut res.results.frames[self.current_frame];
+                                    frame.bubbles.remove(bi);
+                                    // Recount valid/rejected
+                                    frame.num_valid = frame.bubbles.iter().filter(|b| b.is_valid).count();
+                                    frame.num_rejected = frame.bubbles.iter().filter(|b| !b.is_valid).count();
+                                }
+                                self.hovered_bubble = None;
+                            }
+                        }
+
+                        // Change cursor when hovering a bubble
+                        if self.hovered_bubble.is_some() {
+                            ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
+                        } else if image_rect.contains(ui.input(|i| i.pointer.hover_pos().unwrap_or_default())) {
+                            ctx.set_cursor_icon(egui::CursorIcon::Crosshair);
+                        }
+                    } else {
+                        self.hovered_bubble = None;
                     }
                 }
             }
@@ -1230,21 +1298,30 @@ fn draw_overlays(
     scale: f32,
     frame: &FrameResult,
     um_per_pixel: f32,
+    edit_mode: bool,
+    hovered_bubble: Option<usize>,
 ) {
     let origin = rect.min;
-    for b in &frame.bubbles {
+    for (bi, b) in frame.bubbles.iter().enumerate() {
         let cx = origin.x + b.centroid_x * scale;
         let cy = origin.y + b.centroid_y * scale;
         let r_px = (b.diameter_um / 2.0) / um_per_pixel;
         let r = r_px * scale;
-        let (color, dashed) = if b.is_static {
+
+        let is_hovered = edit_mode && hovered_bubble == Some(bi);
+
+        let (color, dashed) = if is_hovered {
+            (Color32::from_rgb(255, 40, 40), false)
+        } else if b.is_static {
             (Color32::from_rgb(255, 234, 0), true)
         } else if b.is_valid {
             (Color32::from_rgb(0, 230, 118), false)
         } else {
             (Color32::from_rgb(255, 23, 68), false)
         };
-        let stroke = Stroke::new(1.5, color);
+
+        let stroke_w = if is_hovered { 2.5 } else { 1.5 };
+        let stroke = Stroke::new(stroke_w, color);
         if dashed {
             let n = 24;
             for k in 0..n {
@@ -1258,7 +1335,22 @@ fn draw_overlays(
         } else {
             painter.circle_stroke(Pos2::new(cx, cy), r, stroke);
         }
-        if b.is_valid {
+
+        if is_hovered {
+            // Fill with translucent red
+            painter.circle_filled(Pos2::new(cx, cy), r, Color32::from_rgba_unmultiplied(255, 40, 40, 50));
+            // Draw × in center
+            let x_size = r.min(12.0).max(4.0);
+            let x_stroke = Stroke::new(2.0, Color32::from_rgb(255, 40, 40));
+            painter.line_segment(
+                [Pos2::new(cx - x_size, cy - x_size), Pos2::new(cx + x_size, cy + x_size)],
+                x_stroke,
+            );
+            painter.line_segment(
+                [Pos2::new(cx + x_size, cy - x_size), Pos2::new(cx - x_size, cy + x_size)],
+                x_stroke,
+            );
+        } else if b.is_valid {
             painter.text(
                 Pos2::new(cx + r + 2.0, cy - r - 2.0),
                 egui::Align2::LEFT_BOTTOM,
