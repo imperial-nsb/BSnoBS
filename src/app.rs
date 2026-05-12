@@ -28,7 +28,8 @@ pub struct AppState {
     model_load_time_ms: Option<u128>,
     model_loading: bool,
     model_load_start: Option<Instant>,
-    model_load_rx: Option<mpsc::Receiver<Result<StudentAnalyzer, String>>>,
+    model_load_rx: Option<mpsc::Receiver<Result<(StudentAnalyzer, Device), String>>>,
+    resolved_device: Option<Device>,
 
     // Settings
     params: AnalysisParameters,
@@ -58,6 +59,23 @@ enum WorkerMsg {
     Progress(usize, usize, String),
     Done(AnalysisResults, StudentAnalyzer),
     Failed(String, StudentAnalyzer),
+}
+
+/// Resolve `Device::Auto` to the concrete device ONNX Runtime will actually use.
+/// On macOS, ort prefers CoreML (registered first in our provider list) and falls
+/// back to CPU if CoreML init fails — here we assume CoreML succeeds on Apple
+/// Silicon/Intel macOS builds.
+fn resolve_device(d: Device) -> Device {
+    match d {
+        Device::Auto => {
+            if cfg!(target_os = "macos") {
+                Device::CoreML
+            } else {
+                Device::Cpu
+            }
+        }
+        other => other,
+    }
 }
 
 fn bundled_weights() -> PathBuf {
@@ -101,6 +119,7 @@ impl AppState {
             model_loading: false,
             model_load_start: None,
             model_load_rx: None,
+            resolved_device: None,
 
             params: AnalysisParameters::default(),
             conf: 0.55,
@@ -131,6 +150,7 @@ impl AppState {
         if self.model_loading { return; }
         self.analyzer = None;
         self.model_load_time_ms = None;
+        self.resolved_device = None;
         self.model_status = "Loading model…".into();
         self.model_loading = true;
         self.model_load_start = Some(Instant::now());
@@ -139,8 +159,11 @@ impl AppState {
         self.model_load_rx = Some(rx);
         let weights = self.weights_path.clone();
         let device = self.device;
+        let resolved = resolve_device(device);
         thread::spawn(move || {
-            let result = StudentAnalyzer::load(&weights, device).map_err(|e| e.to_string());
+            let result = StudentAnalyzer::load(&weights, device)
+                .map(|a| (a, resolved))
+                .map_err(|e| e.to_string());
             let _ = tx.send(result);
         });
     }
@@ -189,17 +212,22 @@ impl AppState {
         if self.model_load_rx.is_none() { return; }
         let maybe = self.model_load_rx.as_ref().unwrap().try_recv();
         match maybe {
-            Ok(Ok(analyzer)) => {
+            Ok(Ok((analyzer, resolved))) => {
                 let ms = self.model_load_start
                     .map(|t| t.elapsed().as_millis()).unwrap_or(0);
                 self.analyzer = Some(analyzer);
                 self.model_load_time_ms = Some(ms);
+                self.resolved_device = Some(resolved);
+                let dev_show = if self.device == Device::Auto {
+                    format!("{} ({})", self.device.label(), resolved.label())
+                } else {
+                    self.device.label().to_string()
+                };
                 self.model_status = format!(
                     "Loaded.\nDevice: {}\nLoad time: {} ms",
-                    self.device.label(),
-                    ms
+                    dev_show, ms
                 );
-                self.status = format!("Model loaded in {ms} ms.");
+                self.status = format!("Model loaded in {ms} ms (device: {dev_show}).");
                 self.model_loading = false;
                 self.model_load_rx = None;
             }
