@@ -161,7 +161,19 @@ fn fbits(x: f32) -> u32 { x.to_bits() }
 // -------------------------------------------------------------------
 
 impl AppState {
-    pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        let mut fonts = egui::FontDefinitions::default();
+        fonts.font_data.insert(
+            "Inter".to_owned(),
+            std::sync::Arc::new(egui::FontData::from_static(include_bytes!("../assets/Inter-Regular.ttf"))),
+        );
+        fonts
+            .families
+            .entry(egui::FontFamily::Proportional)
+            .or_default()
+            .insert(0, "Inter".to_owned());
+        cc.egui_ctx.set_fonts(fonts);
+
         let weights = bundled_weights();
         let mut s = Self {
             weights_path: weights,
