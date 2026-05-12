@@ -22,25 +22,23 @@ class InferenceWorker(QObject):
     def __init__(
         self,
         image_dir: Path,
-        weights: Path,
         params: AnalysisParameters,
         conf: float,
         imgsz: int,
         max_det: int,
-        device: Optional[str],
         reject_static: bool,
         static_cfg: StaticFilterConfig,
+        analyzer: StudentAnalyzer,
     ):
         super().__init__()
         self.image_dir = image_dir
-        self.weights = weights
         self.params = params
         self.conf = conf
         self.imgsz = imgsz
         self.max_det = max_det
-        self.device = device
         self.reject_static = reject_static
         self.static_cfg = static_cfg
+        self.analyzer = analyzer
         self._cancel = False
 
     def cancel(self):
@@ -48,12 +46,11 @@ class InferenceWorker(QObject):
 
     def run(self):
         try:
-            self.status.emit("Loading model…")
-            analyzer = StudentAnalyzer(
-                weights=self.weights, params=self.params,
-                conf=self.conf, imgsz=self.imgsz,
-                max_det=self.max_det, device=self.device,
-            )
+            analyzer = self.analyzer
+            analyzer.params = self.params
+            analyzer.conf = self.conf
+            analyzer.imgsz = self.imgsz
+            analyzer.max_det = self.max_det
 
             files = list_images(self.image_dir)
             if not files:

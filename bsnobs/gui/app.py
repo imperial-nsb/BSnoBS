@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
 from ..cli import default_student_weights
 from ..data import AnalysisResults
 from ..exporter import ResultsExporter
-from ..infer import list_images
+from ..infer import StudentAnalyzer, list_images
 from ..params import AnalysisParameters
 from ..static_filter import StaticFilterConfig
 from .viewer import FrameViewer
@@ -38,6 +38,9 @@ class MainWindow(QMainWindow):
         self._results: Optional[AnalysisResults] = None
         self._worker: Optional[InferenceWorker] = None
         self._thread: Optional[QThread] = None
+        self._analyzer: Optional[StudentAnalyzer] = None
+        self._loaded_weights: Optional[Path] = None
+        self._loaded_device: Optional[str] = None
 
         # ---- toolbar -------------------------------------------------------
         tb = QToolBar("Main")
@@ -46,10 +49,6 @@ class MainWindow(QMainWindow):
         open_act.setShortcut(QKeySequence.Open)
         open_act.triggered.connect(self._select_folder)
         tb.addAction(open_act)
-
-        weights_act = QAction("Pick weights…", self)
-        weights_act.triggered.connect(self._select_weights)
-        tb.addAction(weights_act)
 
         # ---- central split -------------------------------------------------
         splitter = QSplitter(Qt.Horizontal)
@@ -69,6 +68,7 @@ class MainWindow(QMainWindow):
         sb.addWidget(self._status_label, 1)
 
         self._update_weights_label()
+        self._on_model_config_changed()
 
     # ---- panels ------------------------------------------------------------
 
@@ -82,22 +82,50 @@ class MainWindow(QMainWindow):
         self._folder_label.setWordWrap(True)
         layout.addWidget(self._folder_label)
 
+        # ---- Model panel ---------------------------------------------------
+        model_box = QGroupBox("Model")
+        model_layout = QVBoxLayout(model_box)
         self._weights_label = QLabel()
         self._weights_label.setWordWrap(True)
-        self._weights_label.setStyleSheet("color: #888;")
-        layout.addWidget(self._weights_label)
+        self._weights_label.setStyleSheet("color: #888; font-family: monospace;")
+        model_layout.addWidget(self._weights_label)
 
-        # Settings: detection
+        weights_row = QHBoxLayout()
+        self.btn_pick_weights = QPushButton("Pick .pt file…")
+        self.btn_pick_weights.clicked.connect(self._select_weights)
+        self.btn_reset_weights = QPushButton("Use bundled")
+        self.btn_reset_weights.clicked.connect(self._reset_weights)
+        weights_row.addWidget(self.btn_pick_weights)
+        weights_row.addWidget(self.btn_reset_weights)
+        model_layout.addLayout(weights_row)
+
+        device_row = QHBoxLayout()
+        device_row.addWidget(QLabel("Device:"))
+        self.s_device = QComboBox(); self.s_device.addItems(["auto", "cpu", "mps", "0"])
+        self.s_device.currentTextChanged.connect(lambda _: self._on_model_config_changed())
+        device_row.addWidget(self.s_device, 1)
+        model_layout.addLayout(device_row)
+
+        self.btn_load_model = QPushButton("Load model")
+        self.btn_load_model.clicked.connect(self._load_model)
+        model_layout.addWidget(self.btn_load_model)
+
+        self._model_status = QLabel("Not loaded.")
+        self._model_status.setStyleSheet("color: #aaa; font-family: monospace;")
+        self._model_status.setWordWrap(True)
+        model_layout.addWidget(self._model_status)
+
+        layout.addWidget(model_box)
+
+        # Settings: detection (per-run, doesn't require reload)
         det_box = QGroupBox("Detection")
         det_form = QFormLayout(det_box)
         self.s_conf = QDoubleSpinBox(); self.s_conf.setRange(0.01, 1.0); self.s_conf.setSingleStep(0.05); self.s_conf.setValue(0.55); self.s_conf.setDecimals(2)
         self.s_imgsz = QSpinBox(); self.s_imgsz.setRange(128, 2048); self.s_imgsz.setSingleStep(32); self.s_imgsz.setValue(640)
         self.s_max_det = QSpinBox(); self.s_max_det.setRange(10, 10000); self.s_max_det.setSingleStep(100); self.s_max_det.setValue(1000)
-        self.s_device = QComboBox(); self.s_device.addItems(["auto", "cpu", "mps", "0"])
         det_form.addRow("Confidence", self.s_conf)
         det_form.addRow("Image size", self.s_imgsz)
         det_form.addRow("Max detections", self.s_max_det)
-        det_form.addRow("Device", self.s_device)
         layout.addWidget(det_box)
 
         # Settings: physics
@@ -186,7 +214,7 @@ class MainWindow(QMainWindow):
         self._image_dir = path
         n = len(list_images(path))
         self._folder_label.setText(f"<b>Folder:</b> {path}<br/><span style='color:#888'>{n} images</span>")
-        self.btn_run.setEnabled(self._weights is not None)
+        self._refresh_run_enabled()
 
     def _select_weights(self):
         f, _ = QFileDialog.getOpenFileName(self, "Pick YOLO weights", "", "PyTorch weights (*.pt)")
@@ -194,15 +222,77 @@ class MainWindow(QMainWindow):
             return
         self._weights = Path(f)
         self._update_weights_label()
-        if self._image_dir is not None:
-            self.btn_run.setEnabled(True)
+        self._on_model_config_changed()
+
+    def _reset_weights(self):
+        bundled = default_student_weights()
+        if bundled is None:
+            QMessageBox.warning(self, "No bundled weights", "Bundled student.pt not found in the install.")
+            return
+        self._weights = bundled
+        self._update_weights_label()
+        self._on_model_config_changed()
 
     def _update_weights_label(self):
         if self._weights is None:
             self._weights_label.setText("<i>no weights found — pick a .pt file</i>")
+            return
+        bundled = default_student_weights()
+        if bundled is not None and self._weights == bundled:
+            tag = "<b>bundled (default)</b>"
         else:
-            tag = "bundled" if self._weights == default_student_weights() else "custom"
-            self._weights_label.setText(f"Weights ({tag}): {self._weights.name}")
+            tag = "<b>custom</b>"
+        self._weights_label.setText(f"{tag}<br/>{self._weights}")
+
+    def _model_is_current(self) -> bool:
+        return (
+            self._analyzer is not None
+            and self._loaded_weights == self._weights
+            and self._loaded_device == self._device_value()
+        )
+
+    def _on_model_config_changed(self):
+        if self._model_is_current():
+            self.btn_load_model.setText("Reload model")
+            self.btn_load_model.setEnabled(False)
+        else:
+            if self._analyzer is None:
+                self.btn_load_model.setText("Load model")
+            else:
+                self.btn_load_model.setText("Reload model")
+            self.btn_load_model.setEnabled(self._weights is not None)
+        self._refresh_run_enabled()
+
+    def _refresh_run_enabled(self):
+        self.btn_run.setEnabled(self._image_dir is not None and self._analyzer is not None)
+
+    def _load_model(self):
+        if self._weights is None:
+            return
+        self.btn_load_model.setEnabled(False)
+        self._model_status.setText("Loading…")
+        QApplication.processEvents()
+        try:
+            self._analyzer = StudentAnalyzer(
+                weights=self._weights,
+                params=self._build_params(),
+                conf=self.s_conf.value(),
+                imgsz=self.s_imgsz.value(),
+                max_det=self.s_max_det.value(),
+                device=self._device_value(),
+            )
+            self._loaded_weights = self._weights
+            self._loaded_device = self._device_value()
+            dev_show = self._loaded_device or "auto"
+            self._model_status.setText(f"Loaded.\nDevice: {dev_show}")
+            self._status_label.setText(f"Model loaded ({self._weights.name}, device={dev_show}).")
+        except Exception as exc:
+            self._analyzer = None
+            self._loaded_weights = None
+            self._loaded_device = None
+            self._model_status.setText(f"Load failed: {exc}")
+            QMessageBox.critical(self, "Model load failed", f"{type(exc).__name__}: {exc}")
+        self._on_model_config_changed()
 
     # ---- run ---------------------------------------------------------------
 
@@ -220,7 +310,7 @@ class MainWindow(QMainWindow):
         return None if v == "auto" else v
 
     def _run_inference(self):
-        if self._image_dir is None or self._weights is None:
+        if self._image_dir is None or self._analyzer is None:
             return
         self.btn_run.setEnabled(False)
         self.btn_export.setEnabled(False)
@@ -231,18 +321,17 @@ class MainWindow(QMainWindow):
 
         worker = InferenceWorker(
             image_dir=self._image_dir,
-            weights=self._weights,
             params=self._build_params(),
             conf=self.s_conf.value(),
             imgsz=self.s_imgsz.value(),
             max_det=self.s_max_det.value(),
-            device=self._device_value(),
             reject_static=self.s_reject_static.isChecked(),
             static_cfg=StaticFilterConfig(
                 min_frame_frac=self.s_static_frac.value(),
                 tol_px=self.s_static_tol.value(),
                 diameter_tol_frac=self.s_static_diam_tol.value(),
             ),
+            analyzer=self._analyzer,
         )
         thread = QThread()
         worker.moveToThread(thread)
@@ -264,14 +353,14 @@ class MainWindow(QMainWindow):
         self._status_label.setText(f"[{i}/{n}] {name}")
 
     def _on_failed(self, msg: str):
-        self.btn_run.setEnabled(True)
+        self._refresh_run_enabled()
         self._progress.setRange(0, 1); self._progress.setValue(0)
         self._status_label.setText(msg)
         QMessageBox.critical(self, "Inference failed", msg)
 
     def _on_finished(self, results: AnalysisResults):
         self._results = results
-        self.btn_run.setEnabled(True)
+        self._refresh_run_enabled()
         self.btn_export.setEnabled(True)
         self._progress.setRange(0, 1); self._progress.setValue(1)
         self._status_label.setText(f"Done — {results.total_bubbles} bubbles across {results.num_frames} frames.")
