@@ -1283,29 +1283,39 @@ impl AppState {
         }
 
         // Bottom row: slider
-        ui.horizontal(|ui| {
-            if ui.button("◀").clicked() && self.current_frame > 0 {
-                self.current_frame -= 1;
-            }
-            if n_frames > 0 {
-                let mut idx = self.current_frame as i64;
-                let max = (n_frames as i64 - 1).max(0);
-                ui.add(
-                    Slider::new(&mut idx, 0..=max)
-                        .show_value(true)
-                        .clamping(egui::SliderClamping::Always),
-                );
-                self.current_frame = idx.clamp(0, max) as usize;
-            } else {
-                ui.add_enabled(false, Slider::new(&mut 0i64, 0..=0));
-            }
-            if ui.button("▶").clicked() && n_frames > 0 && self.current_frame + 1 < n_frames {
-                self.current_frame += 1;
-            }
-            if n_frames > 0 {
-                ui.label(format!("{}/{}", self.current_frame + 1, n_frames));
-            }
-        });
+        ui.add_space(8.0);
+        ui.with_layout(
+            egui::Layout::left_to_right(egui::Align::Center).with_main_align(egui::Align::Center),
+            |ui| {
+                let available = ui.available_width();
+                // ◀ button, ▶ button, and label take up roughly 120px together.
+                let desired_slider_width = (available - 160.0).max(100.0);
+                ui.spacing_mut().slider_width = desired_slider_width;
+
+                if ui.button("◀").clicked() && self.current_frame > 0 {
+                    self.current_frame -= 1;
+                }
+                if n_frames > 0 {
+                    let mut idx = self.current_frame as i64;
+                    let max = (n_frames as i64 - 1).max(0);
+                    ui.add(
+                        Slider::new(&mut idx, 0..=max)
+                            .show_value(true)
+                            .clamping(egui::SliderClamping::Always)
+                            .trailing_fill(true),
+                    );
+                    self.current_frame = idx.clamp(0, max) as usize;
+                } else {
+                    ui.add_enabled(false, Slider::new(&mut 0i64, 0..=0).trailing_fill(true));
+                }
+                if ui.button("▶").clicked() && n_frames > 0 && self.current_frame + 1 < n_frames {
+                    self.current_frame += 1;
+                }
+                if n_frames > 0 {
+                    ui.label(format!("{}/{}", self.current_frame + 1, n_frames));
+                }
+            },
+        );
 
         // Keyboard navigation
         if n_frames > 0 {
