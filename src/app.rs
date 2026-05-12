@@ -81,9 +81,11 @@ pub struct AppState {
     // Viewer state
     current_frame: usize,
     texture: Option<TextureHandle>,
-    texture_for: Option<(usize, usize)>, // (result idx, frame idx)
+    texture_for: Option<(usize, usize, bool)>, // (result idx, frame idx, bw)
     zoom: f32,
     pan: Vec2,
+    bw_mode: bool,
+    show_overlays: bool,
 
     // Worker
     worker_rx: Option<mpsc::Receiver<WorkerMsg>>,
@@ -172,6 +174,8 @@ impl AppState {
             texture_for: None,
             zoom: 1.0,
             pan: Vec2::ZERO,
+            bw_mode: false,
+            show_overlays: true,
 
             worker_rx: None,
             in_progress: false,
@@ -522,7 +526,7 @@ impl AppState {
         let Some(focus_idx) = self.focused_result else { return };
         let Some(res) = self.results_list.get(focus_idx) else { return };
         if res.results.frames.is_empty() { return; }
-        let key = (focus_idx, self.current_frame);
+        let key = (focus_idx, self.current_frame, self.bw_mode);
         if self.texture_for == Some(key) && self.texture.is_some() {
             return;
         }
@@ -537,9 +541,22 @@ impl AppState {
         };
         let rgba = img.to_rgba8();
         let (w, h) = rgba.dimensions();
+        let bw = self.bw_mode;
         let pixels: Vec<Color32> = rgba
             .pixels()
-            .map(|p| Color32::from_rgba_unmultiplied(p[0], p[1], p[2], p[3]))
+            .map(|p| {
+                if bw {
+                    // Rec. 601 luma
+                    let l = (0.299 * p[0] as f32
+                        + 0.587 * p[1] as f32
+                        + 0.114 * p[2] as f32)
+                        .round()
+                        .clamp(0.0, 255.0) as u8;
+                    Color32::from_rgba_unmultiplied(l, l, l, p[3])
+                } else {
+                    Color32::from_rgba_unmultiplied(p[0], p[1], p[2], p[3])
+                }
+            })
             .collect();
         let color_img = ColorImage {
             size: [w as usize, h as usize],
@@ -547,7 +564,7 @@ impl AppState {
             source_size: Vec2::new(w as f32, h as f32),
         };
         let tex = ctx.load_texture(
-            format!("frame-{}-{}", focus_idx, self.current_frame),
+            format!("frame-{}-{}-{}", focus_idx, self.current_frame, bw as u8),
             color_img,
             Default::default(),
         );
@@ -910,6 +927,49 @@ impl AppState {
 
     fn results_panel(&mut self, ui: &mut egui::Ui) {
         ui.add_space(4.0);
+
+        // ---- Viewer ----
+        ui.heading("Viewer");
+        ui.separator();
+
+        let mut focus_change: Option<usize> = None;
+        ui.horizontal(|ui| {
+            ui.label("Folder");
+            let current_name = self
+                .focused_result
+                .and_then(|i| self.results_list.get(i))
+                .map(|r| r.name.clone())
+                .unwrap_or_else(|| "(none)".into());
+            egui::ComboBox::from_id_salt("viewer-folder")
+                .selected_text(current_name)
+                .width(ui.available_width().min(180.0))
+                .show_ui(ui, |ui| {
+                    if self.results_list.is_empty() {
+                        ui.label(egui::RichText::new("no analyzed folders").italics().weak());
+                    }
+                    for (i, r) in self.results_list.iter().enumerate() {
+                        let selected = self.focused_result == Some(i);
+                        if ui.selectable_label(selected, &r.name).clicked() {
+                            focus_change = Some(i);
+                        }
+                    }
+                });
+        });
+        ui.checkbox(&mut self.bw_mode, "B&W mode");
+        ui.checkbox(&mut self.show_overlays, "Show overlays");
+
+        if let Some(i) = focus_change {
+            self.focused_result = Some(i);
+            self.current_frame = 0;
+            self.texture = None;
+            self.texture_for = None;
+            self.zoom = 1.0;
+            self.pan = Vec2::ZERO;
+        }
+
+        ui.add_space(10.0);
+
+        // ---- Results ----
         ui.heading("Results");
         ui.separator();
 
@@ -923,16 +983,11 @@ impl AppState {
                 if self.results_list.is_empty() {
                     ui.label(egui::RichText::new("(no results yet)").italics().weak());
                 }
-                let mut focus_change: Option<usize> = None;
-                for (i, r) in self.results_list.iter_mut().enumerate() {
+                for r in self.results_list.iter_mut() {
                     ui.horizontal(|ui| {
-                        ui.checkbox(&mut r.visible, "");
-                        let focused = self.focused_result == Some(i);
-                        let label = egui::RichText::new(&r.name).strong();
-                        let label = if focused { label.background_color(Color32::from_rgb(255, 240, 130)).color(Color32::BLACK) } else { label };
-                        if ui.selectable_label(focused, label).clicked() {
-                            focus_change = Some(i);
-                        }
+                        ui.checkbox(&mut r.visible, "")
+                            .on_hover_text("Include in export");
+                        ui.label(egui::RichText::new(&r.name).strong());
                     });
                     let n_static = r.results.frames.iter()
                         .flat_map(|f| f.bubbles.iter())
@@ -964,14 +1019,6 @@ impl AppState {
                         );
                     }
                     ui.separator();
-                }
-                if let Some(i) = focus_change {
-                    self.focused_result = Some(i);
-                    self.current_frame = 0;
-                    self.texture = None;
-                    self.texture_for = None;
-                    self.zoom = 1.0;
-                    self.pan = Vec2::ZERO;
                 }
             });
 
@@ -1080,13 +1127,15 @@ impl AppState {
                         Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
                         Color32::WHITE,
                     );
-                    draw_overlays(
-                        &painter,
-                        target_rect,
-                        scale,
-                        frame,
-                        res.results.parameters.scale_um_per_pixel,
-                    );
+                    if self.show_overlays {
+                        draw_overlays(
+                            &painter,
+                            target_rect,
+                            scale,
+                            frame,
+                            res.results.parameters.scale_um_per_pixel,
+                        );
+                    }
                 }
             }
         } else if focus_idx.is_none() {
