@@ -93,6 +93,7 @@ pub struct AppState {
     focused_result: Option<usize>,
 
     // Viewer state
+    logo_texture: Option<TextureHandle>,
     current_frame: usize,
     texture: Option<TextureHandle>,
     texture_for: Option<(usize, usize, bool)>, // (result idx, frame idx, bw)
@@ -173,6 +174,7 @@ impl AppState {
             .or_default()
             .insert(0, "Inter".to_owned());
         cc.egui_ctx.set_fonts(fonts);
+        egui_extras::install_image_loaders(&cc.egui_ctx);
 
         let weights = bundled_weights();
         let mut s = Self {
@@ -201,6 +203,7 @@ impl AppState {
             results_list: Vec::new(),
             focused_result: None,
 
+            logo_texture: None,
             current_frame: 0,
             texture: None,
             texture_for: None,
@@ -222,6 +225,22 @@ impl AppState {
             start_time: Instant::now(),
         };
         s.last_settings = Some(s.snapshot_settings());
+
+        let logo_bytes = include_bytes!("../assets/logo.png");
+        if let Ok(img) = image::load_from_memory(logo_bytes) {
+            let rgba = img.to_rgba8();
+            let (w, h) = rgba.dimensions();
+            let color_image = egui::ColorImage::from_rgba_unmultiplied(
+                [w as usize, h as usize],
+                rgba.as_raw(),
+            );
+            s.logo_texture = Some(cc.egui_ctx.load_texture(
+                "logo",
+                color_image,
+                egui::TextureOptions::LINEAR,
+            ));
+        }
+
         s.start_model_load();
         s
     }
@@ -529,7 +548,7 @@ impl AppState {
                     name: name.clone(),
                     source_path: src_path,
                     results,
-                    visible: true,
+                    visible: false,
                     static_note,
                 }));
             }
@@ -783,6 +802,22 @@ impl eframe::App for AppState {
             .width_range(220.0..=480.0)
             .frame(side_frame)
             .show(ctx, |ui| {
+                egui::TopBottomPanel::top("logo-panel")
+                    .resizable(false)
+                    .frame(egui::Frame::side_top_panel(&ctx.style())
+                        .inner_margin(egui::Margin::symmetric(4, 6)))
+                    .show_inside(ui, |ui| {
+                        if let Some(tex) = &self.logo_texture {
+                            let logo_h = 34.0;
+                            let logo_w = logo_h * (tex.size()[0] as f32 / tex.size()[1] as f32);
+                            ui.vertical_centered(|ui| {
+                                ui.add(egui::Image::from_texture(
+                                    egui::load::SizedTexture::new(tex.id(), Vec2::new(logo_w, logo_h)),
+                                ));
+                            });
+                        }
+                    });
+
                 let max_settings_h = (ui.available_height() - 250.0).max(100.0);
                 egui::TopBottomPanel::bottom("settings-panel")
                     .resizable(false)
@@ -835,9 +870,6 @@ impl eframe::App for AppState {
 
 impl AppState {
     fn settings_panel(&mut self, ui: &mut egui::Ui) {
-        ui.heading("BSnoBS");
-        ui.separator();
-
         egui::CollapsingHeader::new("Model")
             .default_open(false)
             .show(ui, |ui| {
@@ -1046,46 +1078,64 @@ impl AppState {
         // Result blocks
         let mut focus_change: Option<usize> = None;
         let results_h = (ui.available_height() - 54.0).max(80.0);
+        let focused = self.focused_result;
+        let dim_border = ui.visuals().widgets.noninteractive.bg_stroke.color;
+        let blue_border = Color32::from_rgb(70, 140, 220);
+
         egui::ScrollArea::vertical()
             .id_salt("results-list")
             .max_height(results_h)
+            .auto_shrink([false, false])
             .show(ui, |ui| {
                 if self.results_list.is_empty() {
                     ui.label(egui::RichText::new("(no results yet)").italics().weak());
                 }
-                let focused = self.focused_result;
                 for (i, r) in self.results_list.iter_mut().enumerate() {
                     let is_focused = focused == Some(i);
-                    let stroke = if is_focused {
-                        egui::Stroke::new(2.0, egui::Color32::from_rgb(70, 140, 220))
+                    let (stroke_w, stroke_col) = if is_focused {
+                        (2.0, blue_border)
                     } else {
-                        egui::Stroke::NONE
+                        (1.0, dim_border)
                     };
-                    let frame = egui::Frame::new()
-                        .stroke(stroke)
-                        .inner_margin(egui::Margin::same(6))
-                        .outer_margin(egui::Margin::symmetric(0, 2))
-                        .corner_radius(egui::CornerRadius::same(4));
 
-                    let resp = frame.show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            // Left: name + stats
+                    ui.horizontal(|ui| {
+                        ui.checkbox(&mut r.visible, "")
+                            .on_hover_text("Include in export");
+
+                        let block_w = ui.available_width();
+                        let pad = 8.0_f32;
+                        let frame = egui::Frame::new()
+                            .stroke(Stroke::new(stroke_w, stroke_col))
+                            .inner_margin(egui::Margin::symmetric(pad as i8, 6))
+                            .corner_radius(egui::CornerRadius::same(4));
+
+                        let resp = frame.show(ui, |ui| {
                             ui.vertical(|ui| {
-                                ui.label(egui::RichText::new(&r.name).strong());
+                                ui.set_min_width(block_w - 2.0 * pad - 2.0 * stroke_w);
+                                ui.spacing_mut().item_spacing.y = 2.0;
+
+                                ui.add(
+                                    egui::Label::new(egui::RichText::new(&r.name).strong())
+                                        .truncate(),
+                                );
+
                                 let n_static = r.results.frames.iter()
                                     .flat_map(|f| f.bubbles.iter())
                                     .filter(|b| b.is_static)
                                     .count();
-                                ui.label(
-                                    egui::RichText::new(format!(
-                                        "frames: {}  bubbles: {}  rejected: {}  static: {}",
-                                        r.results.frames.len(),
-                                        r.results.total_bubbles(),
-                                        r.results.total_rejected(),
-                                        n_static,
-                                    ))
-                                    .small()
-                                    .monospace(),
+                                ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(format!(
+                                            "frames: {}  bubbles: {}  rejected: {}  static: {}",
+                                            r.results.frames.len(),
+                                            r.results.total_bubbles(),
+                                            r.results.total_rejected(),
+                                            n_static,
+                                        ))
+                                        .small()
+                                        .monospace(),
+                                    )
+                                    .truncate(),
                                 );
                                 let diams = r.results.diameters_valid();
                                 if !diams.is_empty() {
@@ -1093,36 +1143,33 @@ impl AppState {
                                     let mut sorted = diams.clone();
                                     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
                                     let median = sorted[sorted.len() / 2];
-                                    ui.label(
-                                        egui::RichText::new(format!(
-                                            "mean: {:.2} μm  median: {:.2} μm", mean, median,
-                                        ))
-                                        .small()
-                                        .monospace(),
+                                    ui.add(
+                                        egui::Label::new(
+                                            egui::RichText::new(format!(
+                                                "mean: {:.2} μm  median: {:.2} μm", mean, median,
+                                            ))
+                                            .small()
+                                            .monospace(),
+                                        )
+                                        .truncate(),
                                     );
                                 }
                             });
-                            // Right: export checkbox
-                            ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
-                                ui.checkbox(&mut r.visible, "")
-                                    .on_hover_text("Include in export");
-                            });
                         });
-                    });
 
-                    // Whole-block hover + click to focus
-                    let block_resp = ui.interact(
-                        resp.response.rect,
-                        ui.id().with(("result-block", i)),
-                        egui::Sense::click(),
-                    );
-                    if block_resp.hovered() {
-                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                    }
-                    if block_resp.clicked() {
-                        focus_change = Some(i);
-                    }
-                    ui.separator();
+                        let block_resp = ui.interact(
+                            resp.response.rect,
+                            ui.id().with(("result-block", i)),
+                            Sense::click(),
+                        );
+                        if block_resp.hovered() {
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                        }
+                        if block_resp.clicked() {
+                            focus_change = Some(i);
+                        }
+                    });
+                    ui.add_space(4.0);
                 }
             });
 
@@ -1390,12 +1437,19 @@ impl AppState {
                 if n_frames > 0 {
                     let mut idx = self.current_frame as i64;
                     let max = (n_frames as i64 - 1).max(0);
-                    ui.add(
-                        Slider::new(&mut idx, 0..=max)
-                            .show_value(true)
-                            .clamping(egui::SliderClamping::Always)
-                            .trailing_fill(true),
-                    );
+                    ui.scope(|ui| {
+                        let v = &mut ui.style_mut().visuals;
+                        v.selection.bg_fill = Color32::from_gray(110);
+                        v.widgets.inactive.fg_stroke.color = Color32::from_gray(160);
+                        v.widgets.hovered.fg_stroke.color  = Color32::from_gray(200);
+                        v.widgets.active.fg_stroke.color   = Color32::from_gray(220);
+                        ui.add(
+                            Slider::new(&mut idx, 0..=max)
+                                .show_value(true)
+                                .clamping(egui::SliderClamping::Always)
+                                .trailing_fill(true),
+                        );
+                    });
                     self.current_frame = idx.clamp(0, max) as usize;
                 } else {
                     ui.add_enabled(false, Slider::new(&mut 0i64, 0..=0).trailing_fill(true));
