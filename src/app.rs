@@ -1058,6 +1058,77 @@ impl AppState {
         });
     }
 
+    /// Draw a compact bar histogram of bubble diameters into `rect`.
+    /// `axis_min`/`axis_max` define the X-axis range so multiple
+    /// histograms can be visually compared.
+    fn draw_mini_histogram(
+        ui: &egui::Ui,
+        rect: Rect,
+        diams: &[f32],
+        axis_min: f32,
+        axis_max: f32,
+    ) {
+        let painter = ui.painter();
+        let bg = ui.visuals().extreme_bg_color;
+        let bar_col = ui.visuals().widgets.inactive.fg_stroke.color;
+        let axis_col = ui.visuals().weak_text_color();
+
+        painter.rect_filled(rect, 2.0, bg);
+
+        if diams.is_empty() || axis_max <= axis_min {
+            return;
+        }
+
+        let n_bins = 24;
+        let bin_w = (axis_max - axis_min) / n_bins as f32;
+        let mut counts = vec![0u32; n_bins];
+        for &d in diams {
+            if d < axis_min || d > axis_max { continue; }
+            let idx = (((d - axis_min) / bin_w) as usize).min(n_bins - 1);
+            counts[idx] += 1;
+        }
+        let max_count = *counts.iter().max().unwrap_or(&1) as f32;
+        let (min_d, max_d) = (axis_min, axis_max);
+
+        let plot_h = rect.height() - 12.0;
+        let plot_top = rect.top() + 4.0;
+        let plot_bot = plot_top + plot_h;
+        let plot_left = rect.left() + 4.0;
+        let plot_right = rect.right() - 4.0;
+        let plot_w = plot_right - plot_left;
+        let bar_px = plot_w / n_bins as f32;
+
+        for (i, &c) in counts.iter().enumerate() {
+            if c == 0 { continue; }
+            let h = (c as f32 / max_count) * plot_h;
+            let x0 = plot_left + i as f32 * bar_px + 0.5;
+            let x1 = x0 + (bar_px - 1.0).max(1.0);
+            let y0 = plot_bot - h;
+            painter.rect_filled(
+                Rect::from_min_max(Pos2::new(x0, y0), Pos2::new(x1, plot_bot)),
+                0.0,
+                bar_col,
+            );
+        }
+
+        // Axis labels (min, max μm) along the bottom
+        let label_y = rect.bottom() - 2.0;
+        painter.text(
+            Pos2::new(plot_left, label_y),
+            egui::Align2::LEFT_BOTTOM,
+            format!("{:.1}", min_d),
+            egui::FontId::monospace(9.0),
+            axis_col,
+        );
+        painter.text(
+            Pos2::new(plot_right, label_y),
+            egui::Align2::RIGHT_BOTTOM,
+            format!("{:.1} μm", max_d),
+            egui::FontId::monospace(9.0),
+            axis_col,
+        );
+    }
+
     fn results_panel(&mut self, ui: &mut egui::Ui) {
         ui.add_space(4.0);
         ui.heading("Results");
@@ -1081,6 +1152,23 @@ impl AppState {
         let focused = self.focused_result;
         let dim_border = ui.visuals().widgets.noninteractive.bg_stroke.color;
         let blue_border = Color32::from_rgb(70, 140, 220);
+
+        // Global diameter range, used to keep histogram axes consistent across cards.
+        let (global_min, global_max) = {
+            let mut mn = f32::INFINITY;
+            let mut mx = f32::NEG_INFINITY;
+            for r in &self.results_list {
+                for d in r.results.diameters_valid() {
+                    if d < mn { mn = d; }
+                    if d > mx { mx = d; }
+                }
+            }
+            if mn.is_finite() && mx.is_finite() && mx > mn {
+                (mn, mx)
+            } else {
+                (0.0, 1.0)
+            }
+        };
 
         egui::ScrollArea::vertical()
             .id_salt("results-list")
@@ -1119,34 +1207,79 @@ impl AppState {
                                         .truncate(),
                                 );
 
-                                let n_static = r.results.frames.iter()
-                                    .flat_map(|f| f.bubbles.iter())
-                                    .filter(|b| b.is_static)
-                                    .count();
                                 ui.add(
                                     egui::Label::new(
                                         egui::RichText::new(format!(
-                                            "frames: {}  bubbles: {}  rejected: {}  static: {}",
+                                            "frames: {}  bubbles: {}",
                                             r.results.frames.len(),
                                             r.results.total_bubbles(),
-                                            r.results.total_rejected(),
-                                            n_static,
                                         ))
                                         .small()
                                         .monospace(),
                                     )
                                     .truncate(),
                                 );
+
                                 let diams = r.results.diameters_valid();
+                                let mut sorted: Vec<f32> = Vec::new();
                                 if !diams.is_empty() {
                                     let mean: f32 = diams.iter().sum::<f32>() / diams.len() as f32;
-                                    let mut sorted = diams.clone();
+                                    sorted = diams.clone();
                                     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
                                     let median = sorted[sorted.len() / 2];
                                     ui.add(
                                         egui::Label::new(
                                             egui::RichText::new(format!(
                                                 "mean: {:.2} μm  median: {:.2} μm", mean, median,
+                                            ))
+                                            .small()
+                                            .monospace(),
+                                        )
+                                        .truncate(),
+                                    );
+                                }
+
+                                if is_focused && !sorted.is_empty() {
+                                    let min_d = sorted[0];
+                                    let max_d = sorted[sorted.len() - 1];
+                                    ui.add(
+                                        egui::Label::new(
+                                            egui::RichText::new(format!(
+                                                "min:  {:.2} μm  max:    {:.2} μm",
+                                                min_d, max_d,
+                                            ))
+                                            .small()
+                                            .monospace(),
+                                        )
+                                        .truncate(),
+                                    );
+                                }
+
+                                if !sorted.is_empty() {
+                                    ui.add_space(4.0);
+                                    let hist_w = ui.available_width();
+                                    let hist_h = 64.0_f32;
+                                    let (rect, _resp) = ui.allocate_exact_size(
+                                        Vec2::new(hist_w, hist_h),
+                                        Sense::hover(),
+                                    );
+                                    Self::draw_mini_histogram(
+                                        ui, rect, &sorted, global_min, global_max,
+                                    );
+                                }
+
+                                if is_focused {
+                                    let n_static = r.results.frames.iter()
+                                        .flat_map(|f| f.bubbles.iter())
+                                        .filter(|b| b.is_static)
+                                        .count();
+                                    ui.add_space(2.0);
+                                    ui.add(
+                                        egui::Label::new(
+                                            egui::RichText::new(format!(
+                                                "rejected: {}  static: {}",
+                                                r.results.total_rejected(),
+                                                n_static,
                                             ))
                                             .small()
                                             .monospace(),
