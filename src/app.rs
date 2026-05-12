@@ -14,15 +14,47 @@ use crate::inference::{list_images, Device, StudentAnalyzer, INPUT_SIZE};
 use crate::static_filter::{self, StaticFilterConfig};
 use crate::types::{AnalysisParameters, AnalysisResults, FrameResult};
 
+// -------------------------------------------------------------------
+// Data
+// -------------------------------------------------------------------
+
+pub struct WorkspaceEntry {
+    pub path: PathBuf,
+    pub name: String,
+    pub image_files: Vec<PathBuf>,
+    pub run_enabled: bool,
+}
+
+pub struct ResultEntry {
+    pub name: String,
+    pub source_path: PathBuf,
+    pub results: AnalysisResults,
+    pub visible: bool, // include in export / shown in viewer dropdown
+    pub static_note: Option<String>,
+}
+
+/// Hash-able snapshot of every setting that affects results.
+/// When this changes between frames, stored results are invalidated.
+#[derive(Clone, PartialEq)]
+struct SettingsSnapshot {
+    conf: u32,
+    iou: u32,
+    max_det: usize,
+    scale: u32,
+    vol: u32,
+    min_d: u32,
+    max_d: u32,
+    reject_static: bool,
+    min_frame_frac: u32,
+    tol_px: u32,
+    diam_tol: u32,
+}
+
 pub struct AppState {
-    // Folder / weights
-    image_dir: Option<PathBuf>,
-    image_files: Vec<PathBuf>,
+    // Model
     weights_path: PathBuf,
     using_bundled: bool,
     device: Device,
-
-    // Cached model
     analyzer: Option<StudentAnalyzer>,
     model_status: String,
     model_load_time_ms: Option<u128>,
@@ -39,78 +71,79 @@ pub struct AppState {
     max_det: usize,
     reject_static: bool,
     static_cfg: StaticFilterConfig,
+    last_settings: Option<SettingsSnapshot>,
 
-    // Results + viewer state
-    results: Option<AnalysisResults>,
+    // Workspace + results
+    workspace: Vec<WorkspaceEntry>,
+    workspace_selected: Option<usize>,
+    results_list: Vec<ResultEntry>,
+    focused_result: Option<usize>,
+
+    // Viewer state
     current_frame: usize,
     texture: Option<TextureHandle>,
-    texture_for_frame: Option<usize>,
+    texture_for: Option<(usize, usize)>, // (result idx, frame idx)
     zoom: f32,
 
-    // Worker plumbing
+    // Worker
     worker_rx: Option<mpsc::Receiver<WorkerMsg>>,
     in_progress: bool,
-    progress: (usize, usize),
+    progress: RunProgress,
     status: String,
     start_time: Instant,
 }
 
+#[derive(Default, Clone, Copy)]
+struct RunProgress {
+    folder_idx: usize,
+    folder_total: usize,
+    frame_idx: usize,
+    frame_total: usize,
+}
+
 enum WorkerMsg {
-    Progress(usize, usize, String),
-    Done(AnalysisResults, StudentAnalyzer),
+    Progress {
+        folder_idx: usize,
+        folder_total: usize,
+        folder_name: String,
+        frame_idx: usize,
+        frame_total: usize,
+        frame_name: String,
+    },
+    FolderDone(ResultEntry),
+    AllDone(StudentAnalyzer),
     Failed(String, StudentAnalyzer),
 }
 
-/// Resolve `Device::Auto` to the concrete device ONNX Runtime will actually use.
-/// On macOS, ort prefers CoreML (registered first in our provider list) and falls
-/// back to CPU if CoreML init fails — here we assume CoreML succeeds on Apple
-/// Silicon/Intel macOS builds.
+// -------------------------------------------------------------------
+// Helpers
+// -------------------------------------------------------------------
+
 fn resolve_device(d: Device) -> Device {
     match d {
         Device::Auto => {
-            if cfg!(target_os = "macos") {
-                Device::CoreML
-            } else {
-                Device::Cpu
-            }
+            if cfg!(target_os = "macos") { Device::CoreML } else { Device::Cpu }
         }
         other => other,
     }
 }
 
 fn bundled_weights() -> PathBuf {
-    // Bundled relative to the running binary at debug/release time.
-    // First try CARGO_MANIFEST_DIR (dev), then exe-relative.
-    if let Some(d) = option_env!("CARGO_MANIFEST_DIR") {
-        let p = Path::new(d).join("assets/student.onnx");
-        if p.exists() {
-            return p;
-        }
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            for cand in [
-                dir.join("../assets/student.onnx"),
-                dir.join("assets/student.onnx"),
-                dir.join("../share/bsnobs-rs/student.onnx"),
-            ] {
-                if cand.exists() {
-                    return cand;
-                }
-            }
-        }
-    }
-    PathBuf::from("assets/student.onnx")
+    PathBuf::from("<embedded>")
 }
+
+fn fbits(x: f32) -> u32 { x.to_bits() }
+
+// -------------------------------------------------------------------
+// AppState impl
+// -------------------------------------------------------------------
 
 impl AppState {
     pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
         let weights = bundled_weights();
         let mut s = Self {
-            image_dir: None,
-            image_files: Vec::new(),
-            using_bundled: true,
             weights_path: weights,
+            using_bundled: true,
             device: Device::Auto,
 
             analyzer: None,
@@ -128,23 +161,64 @@ impl AppState {
             max_det: 1000,
             reject_static: true,
             static_cfg: StaticFilterConfig::default(),
+            last_settings: None,
 
-            results: None,
+            workspace: Vec::new(),
+            workspace_selected: None,
+            results_list: Vec::new(),
+            focused_result: None,
+
             current_frame: 0,
             texture: None,
-            texture_for_frame: None,
+            texture_for: None,
             zoom: 1.0,
 
             worker_rx: None,
             in_progress: false,
-            progress: (0, 0),
-            status: "Pick a folder of microscopy images to begin.".into(),
+            progress: RunProgress::default(),
+            status: "Add folders to your workspace to begin.".into(),
             start_time: Instant::now(),
         };
-        // Auto-load the bundled model on startup.
+        s.last_settings = Some(s.snapshot_settings());
         s.start_model_load();
         s
     }
+
+    fn snapshot_settings(&self) -> SettingsSnapshot {
+        SettingsSnapshot {
+            conf: fbits(self.conf),
+            iou: fbits(self.iou),
+            max_det: self.max_det,
+            scale: fbits(self.params.scale_um_per_pixel),
+            vol: fbits(self.params.sample_volume_per_frame_ul),
+            min_d: fbits(self.params.min_diameter_um),
+            max_d: fbits(self.params.max_diameter_um),
+            reject_static: self.reject_static,
+            min_frame_frac: fbits(self.static_cfg.min_frame_frac),
+            tol_px: fbits(self.static_cfg.tol_px),
+            diam_tol: fbits(self.static_cfg.diameter_tol_frac),
+        }
+    }
+
+    fn maybe_invalidate_results(&mut self) {
+        if self.in_progress { return; }
+        let now = self.snapshot_settings();
+        let changed = match &self.last_settings {
+            Some(prev) => prev != &now,
+            None => true,
+        };
+        self.last_settings = Some(now);
+        if changed && !self.results_list.is_empty() {
+            self.results_list.clear();
+            self.focused_result = None;
+            self.texture = None;
+            self.texture_for = None;
+            self.current_frame = 0;
+            self.status = "Settings changed — previous results cleared.".into();
+        }
+    }
+
+    // ------------- Model loading -------------
 
     fn start_model_load(&mut self) {
         if self.model_loading { return; }
@@ -160,10 +234,14 @@ impl AppState {
         let weights = self.weights_path.clone();
         let device = self.device;
         let resolved = resolve_device(device);
+        let use_bundled = self.using_bundled;
         thread::spawn(move || {
-            let result = StudentAnalyzer::load(&weights, device)
-                .map(|a| (a, resolved))
-                .map_err(|e| e.to_string());
+            let loaded = if use_bundled {
+                StudentAnalyzer::load_from_bytes(crate::inference::BUNDLED_WEIGHTS, device)
+            } else {
+                StudentAnalyzer::load(&weights, device)
+            };
+            let result = loaded.map(|a| (a, resolved)).map_err(|e| e.to_string());
             let _ = tx.send(result);
         });
     }
@@ -192,11 +270,7 @@ impl AppState {
                         ui.horizontal(|ui| {
                             ui.add(egui::Spinner::new().size(28.0));
                             ui.vertical(|ui| {
-                                ui.label(
-                                    egui::RichText::new("Loading model…")
-                                        .heading()
-                                        .strong(),
-                                );
+                                ui.label(egui::RichText::new("Loading model…").heading().strong());
                                 ui.label(
                                     egui::RichText::new(format!("{} ms", elapsed_ms))
                                         .monospace()
@@ -213,8 +287,7 @@ impl AppState {
         let maybe = self.model_load_rx.as_ref().unwrap().try_recv();
         match maybe {
             Ok(Ok((analyzer, resolved))) => {
-                let ms = self.model_load_start
-                    .map(|t| t.elapsed().as_millis()).unwrap_or(0);
+                let ms = self.model_load_start.map(|t| t.elapsed().as_millis()).unwrap_or(0);
                 self.analyzer = Some(analyzer);
                 self.model_load_time_ms = Some(ms);
                 self.resolved_device = Some(resolved);
@@ -223,10 +296,7 @@ impl AppState {
                 } else {
                     self.device.label().to_string()
                 };
-                self.model_status = format!(
-                    "Loaded.\nDevice: {}\nLoad time: {} ms",
-                    dev_show, ms
-                );
+                self.model_status = format!("Loaded.\nDevice: {}\nLoad time: {} ms", dev_show, ms);
                 self.status = format!("Model loaded in {ms} ms (device: {dev_show}).");
                 self.model_loading = false;
                 self.model_load_rx = None;
@@ -243,19 +313,6 @@ impl AppState {
                 self.model_loading = false;
                 self.model_load_rx = None;
             }
-        }
-    }
-
-    fn pick_folder(&mut self) {
-        if let Some(p) = rfd::FileDialog::new().pick_folder() {
-            let files = list_images(&p);
-            if files.is_empty() {
-                self.status = format!("No images in {}", p.display());
-                return;
-            }
-            self.status = format!("Folder: {} ({} images)", p.display(), files.len());
-            self.image_files = files;
-            self.image_dir = Some(p);
         }
     }
 
@@ -280,11 +337,61 @@ impl AppState {
         self.model_load_time_ms = None;
     }
 
+    // ------------- Workspace -------------
+
+    fn add_folder(&mut self) {
+        if let Some(p) = rfd::FileDialog::new().pick_folder() {
+            if self.workspace.iter().any(|w| w.path == p) {
+                self.status = format!("Already in workspace: {}", p.display());
+                return;
+            }
+            let files = list_images(&p);
+            if files.is_empty() {
+                self.status = format!("No images in {}", p.display());
+                return;
+            }
+            let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("folder").to_string();
+            self.status = format!("Added {} ({} images)", name, files.len());
+            self.workspace.push(WorkspaceEntry {
+                path: p,
+                name,
+                image_files: files,
+                run_enabled: true,
+            });
+            if self.workspace_selected.is_none() {
+                self.workspace_selected = Some(self.workspace.len() - 1);
+            }
+        }
+    }
+
+    fn remove_selected_folder(&mut self) {
+        let Some(i) = self.workspace_selected else { return };
+        if i >= self.workspace.len() { return; }
+        self.workspace.remove(i);
+        self.workspace_selected = if self.workspace.is_empty() {
+            None
+        } else {
+            Some(i.min(self.workspace.len() - 1))
+        };
+    }
+
+    // ------------- Run -------------
+
     fn start_run(&mut self) {
-        let Some(image_dir) = self.image_dir.clone() else { return };
-        let Some(_) = self.analyzer.as_ref() else { return };
-        let files = self.image_files.clone();
-        // Move analyzer onto worker thread; we'll restore (a new) one when done.
+        if self.analyzer.is_none() { return; }
+        if self.in_progress { return; }
+        let folders: Vec<(usize, PathBuf, String, Vec<PathBuf>)> = self
+            .workspace
+            .iter()
+            .enumerate()
+            .filter(|(_, w)| w.run_enabled && !w.image_files.is_empty())
+            .map(|(i, w)| (i, w.path.clone(), w.name.clone(), w.image_files.clone()))
+            .collect();
+        if folders.is_empty() {
+            self.status = "Nothing to run — tick at least one folder in the workspace.".into();
+            return;
+        }
+
         let mut analyzer = self.analyzer.take().expect("checked above");
         let params = self.params.clone();
         let conf = self.conf;
@@ -292,56 +399,72 @@ impl AppState {
         let max_det = self.max_det;
         let reject_static = self.reject_static;
         let static_cfg = self.static_cfg;
-        let sample_name = image_dir
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("sample")
-            .to_string();
+
+        // Drop any existing results for paths we're about to re-run.
+        let rerun_paths: std::collections::HashSet<_> =
+            folders.iter().map(|(_, p, _, _)| p.clone()).collect();
+        self.results_list.retain(|r| !rerun_paths.contains(&r.source_path));
 
         let (tx, rx) = mpsc::channel();
         self.worker_rx = Some(rx);
         self.in_progress = true;
         self.start_time = Instant::now();
-        self.progress = (0, files.len());
-        self.status = "Running inference…".into();
+        let folder_total = folders.len();
+        self.progress = RunProgress {
+            folder_idx: 0,
+            folder_total,
+            frame_idx: 0,
+            frame_total: 0,
+        };
+        self.status = format!("Running inference on {folder_total} folder(s)…");
 
         thread::spawn(move || {
-            let n = files.len();
-            let mut results = AnalysisResults {
-                sample_name,
-                parameters: params.clone(),
-                frames: Vec::with_capacity(n),
-            };
-            for (i, path) in files.iter().enumerate() {
-                let _ = tx.send(WorkerMsg::Progress(
-                    i,
-                    n,
-                    path.file_name().and_then(|s| s.to_str()).unwrap_or("").to_string(),
-                ));
-                match analyzer.predict_image(path, &params, conf, iou, max_det) {
-                    Ok(frame) => results.frames.push(frame),
-                    Err(e) => {
-                        let _ = tx.send(WorkerMsg::Failed(
-                            format!("{}: {}", path.display(), e),
-                            analyzer,
-                        ));
-                        return;
+            for (fi, (_, src_path, name, files)) in folders.into_iter().enumerate() {
+                let n = files.len();
+                let mut results = AnalysisResults {
+                    sample_name: name.clone(),
+                    parameters: params.clone(),
+                    frames: Vec::with_capacity(n),
+                };
+                for (i, path) in files.iter().enumerate() {
+                    let _ = tx.send(WorkerMsg::Progress {
+                        folder_idx: fi,
+                        folder_total,
+                        folder_name: name.clone(),
+                        frame_idx: i,
+                        frame_total: n,
+                        frame_name: path.file_name().and_then(|s| s.to_str()).unwrap_or("").to_string(),
+                    });
+                    match analyzer.predict_image(path, &params, conf, iou, max_det) {
+                        Ok(frame) => results.frames.push(frame),
+                        Err(e) => {
+                            let _ = tx.send(WorkerMsg::Failed(
+                                format!("{}: {}", path.display(), e),
+                                analyzer,
+                            ));
+                            return;
+                        }
                     }
                 }
+                let mut static_note: Option<String> = None;
+                if reject_static {
+                    let s = static_filter::apply(&mut results, &static_cfg);
+                    if s.n_rejected > 0 {
+                        static_note = Some(format!(
+                            "{}: static filter rejected {} detection(s) across {} cluster(s)",
+                            name, s.n_rejected, s.n_clusters
+                        ));
+                    }
+                }
+                let _ = tx.send(WorkerMsg::FolderDone(ResultEntry {
+                    name: name.clone(),
+                    source_path: src_path,
+                    results,
+                    visible: true,
+                    static_note,
+                }));
             }
-            let _ = tx.send(WorkerMsg::Progress(n, n, "done".into()));
-            if reject_static {
-                let s = static_filter::apply(&mut results, &static_cfg);
-                let _ = tx.send(WorkerMsg::Progress(
-                    n,
-                    n,
-                    format!(
-                        "static filter: {} detections across {} persistent locations",
-                        s.n_rejected, s.n_clusters
-                    ),
-                ));
-            }
-            let _ = tx.send(WorkerMsg::Done(results, analyzer));
+            let _ = tx.send(WorkerMsg::AllDone(analyzer));
         });
     }
 
@@ -356,25 +479,41 @@ impl AppState {
         }
         for msg in drained {
             match msg {
-                WorkerMsg::Progress(i, n, name) => {
-                    self.progress = (i, n);
-                    self.status = format!("[{i}/{n}] {name}");
-                }
-                WorkerMsg::Done(results, analyzer) => {
-                    let elapsed = self.start_time.elapsed().as_millis();
+                WorkerMsg::Progress {
+                    folder_idx, folder_total, folder_name, frame_idx, frame_total, frame_name,
+                } => {
+                    self.progress = RunProgress { folder_idx, folder_total, frame_idx, frame_total };
                     self.status = format!(
-                        "Done — {} bubbles across {} frames in {} ms",
-                        results.total_bubbles(),
-                        results.frames.len(),
-                        elapsed
+                        "[{}/{}] {}  —  frame [{}/{}] {}",
+                        folder_idx + 1, folder_total, folder_name,
+                        frame_idx + 1, frame_total, frame_name
                     );
-                    self.results = Some(results);
+                }
+                WorkerMsg::FolderDone(entry) => {
+                    if let Some(note) = &entry.static_note {
+                        self.status = note.clone();
+                    }
+                    self.results_list.push(entry);
+                    self.focused_result = Some(self.results_list.len() - 1);
                     self.current_frame = 0;
                     self.texture = None;
-                    self.texture_for_frame = None;
+                    self.texture_for = None;
+                }
+                WorkerMsg::AllDone(analyzer) => {
+                    let elapsed = self.start_time.elapsed().as_millis();
+                    let n_samples = self.progress.folder_total;
+                    let total_bubbles: usize =
+                        self.results_list.iter().map(|r| r.results.total_bubbles()).sum();
+                    self.status = format!(
+                        "Done — {} sample(s), {} bubbles total in {} ms",
+                        n_samples, total_bubbles, elapsed
+                    );
                     self.in_progress = false;
                     self.worker_rx = None;
                     self.analyzer = Some(analyzer);
+                    // After a run completes, fix the settings baseline so post-run
+                    // tweaks compare against the values that produced these results.
+                    self.last_settings = Some(self.snapshot_settings());
                 }
                 WorkerMsg::Failed(err, analyzer) => {
                     self.status = format!("Inference failed: {err}");
@@ -387,15 +526,21 @@ impl AppState {
         ctx.request_repaint_after(std::time::Duration::from_millis(50));
     }
 
+    // ------------- Viewer -------------
+
+    fn focused_results(&self) -> Option<&ResultEntry> {
+        self.focused_result.and_then(|i| self.results_list.get(i))
+    }
+
     fn ensure_frame_texture(&mut self, ctx: &egui::Context) {
-        let Some(res) = &self.results else { return };
-        if res.frames.is_empty() {
+        let Some(focus_idx) = self.focused_result else { return };
+        let Some(res) = self.results_list.get(focus_idx) else { return };
+        if res.results.frames.is_empty() { return; }
+        let key = (focus_idx, self.current_frame);
+        if self.texture_for == Some(key) && self.texture.is_some() {
             return;
         }
-        if self.texture_for_frame == Some(self.current_frame) && self.texture.is_some() {
-            return;
-        }
-        let frame = &res.frames[self.current_frame];
+        let frame = &res.results.frames[self.current_frame];
         let path = &frame.image_path;
         let img = match ImageReader::open(path).and_then(|r| r.with_guessed_format()) {
             Ok(r) => match r.decode() {
@@ -415,53 +560,75 @@ impl AppState {
             pixels,
             source_size: Vec2::new(w as f32, h as f32),
         };
-        let tex = ctx.load_texture(format!("frame-{}", self.current_frame), color_img, Default::default());
+        let tex = ctx.load_texture(
+            format!("frame-{}-{}", focus_idx, self.current_frame),
+            color_img,
+            Default::default(),
+        );
         self.texture = Some(tex);
-        self.texture_for_frame = Some(self.current_frame);
+        self.texture_for = Some(key);
     }
 
-    fn export_results(&mut self) {
-        let Some(results) = &self.results else { return };
-        let Some(image_dir) = &self.image_dir else { return };
+    // ------------- Export -------------
+
+    fn export_visible_results(&mut self) {
+        let visible: Vec<&ResultEntry> = self.results_list.iter().filter(|r| r.visible).collect();
+        if visible.is_empty() {
+            self.status = "Nothing visible to export.".into();
+            return;
+        }
         let ts = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
         let conf_tag = format!("conf{:02}", (self.conf * 100.0).round() as u32);
         let suffix = if self.reject_static { "_static_rs" } else { "_rs" };
-        let default_name = format!(
-            "{}_count_{}{}_{}",
-            image_dir.file_name().and_then(|s| s.to_str()).unwrap_or("sample"),
-            conf_tag,
-            suffix,
-            ts
-        );
-        let default_dir = image_dir.parent().unwrap_or(image_dir).join(&default_name);
-
-        let chosen = rfd::FileDialog::new()
-            .set_directory(image_dir.parent().unwrap_or(image_dir))
-            .set_title(&format!("Choose parent dir; will create {}", default_name))
-            .pick_folder();
-        let target = match chosen {
-            Some(parent) => parent.join(&default_name),
-            None => default_dir,
+        let default_name = if visible.len() == 1 {
+            format!("{}_count_{}{}_{}", visible[0].name, conf_tag, suffix, ts)
+        } else {
+            format!("bsnobs_run_{}{}_{}", conf_tag, suffix, ts)
         };
+        let parent_hint = visible[0]
+            .source_path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("."));
+
+        let Some(parent) = rfd::FileDialog::new()
+            .set_directory(&parent_hint)
+            .set_title(&format!("Choose parent dir; will create {default_name}"))
+            .pick_folder()
+        else { return };
+        let target = parent.join(&default_name);
         if let Err(e) = std::fs::create_dir_all(&target) {
             self.status = format!("Could not create {}: {}", target.display(), e);
             return;
         }
-        match exporter::export(results, &target) {
-            Ok(()) => {
-                self.status = format!("Exported to {}", target.display());
-                if let Err(e) = write_metadata(self, results, &target) {
-                    self.status = format!("Exported, but metadata failed: {e}");
-                }
+
+        for r in &visible {
+            let sub = if visible.len() == 1 { target.clone() } else { target.join(&r.name) };
+            if let Err(e) = std::fs::create_dir_all(&sub) {
+                self.status = format!("Could not create {}: {}", sub.display(), e);
+                return;
             }
-            Err(e) => self.status = format!("Export failed: {e}"),
+            if let Err(e) = exporter::export(&r.results, &sub) {
+                self.status = format!("Export failed for {}: {}", r.name, e);
+                return;
+            }
+            if let Err(e) = write_metadata(self, &r.results, &r.source_path, &sub) {
+                self.status = format!("Metadata write failed for {}: {}", r.name, e);
+                return;
+            }
         }
+        self.status = format!("Exported {} sample(s) to {}", visible.len(), target.display());
     }
 }
+
+// -------------------------------------------------------------------
+// Metadata write (per-sample)
+// -------------------------------------------------------------------
 
 fn write_metadata(
     app: &AppState,
     results: &AnalysisResults,
+    source_path: &Path,
     target: &Path,
 ) -> Result<()> {
     let n_static = results
@@ -473,7 +640,7 @@ fn write_metadata(
     let meta = serde_json::json!({
         "command": "gui-rs",
         "timestamp": chrono::Local::now().to_rfc3339(),
-        "image_dir": app.image_dir.as_ref().map(|p| p.display().to_string()),
+        "image_dir": source_path.display().to_string(),
         "output_dir": target.display().to_string(),
         "weights": app.weights_path.display().to_string(),
         "weights_bundled": app.using_bundled,
@@ -509,31 +676,72 @@ fn write_metadata(
     Ok(())
 }
 
+// -------------------------------------------------------------------
+// eframe::App
+// -------------------------------------------------------------------
+
 impl eframe::App for AppState {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.drain_worker(ctx);
         self.drain_model_load(ctx);
         if self.model_loading {
-            // Repaint frequently so the spinner animates and the elapsed counter ticks.
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
+        // Snap settings invalidation BEFORE drawing so widget changes from
+        // last frame are caught.
+        self.maybe_invalidate_results();
 
-        egui::SidePanel::left("settings")
+        let side_frame = egui::Frame::side_top_panel(&ctx.style())
+            .inner_margin(egui::Margin::symmetric(12, 10));
+
+        // Left side: settings on top, workspace+RUN on the bottom.
+        egui::SidePanel::left("left-side")
             .resizable(true)
-            .default_width(330.0)
+            .default_width(340.0)
+            .frame(side_frame)
             .show(ctx, |ui| {
-                self.left_panel(ui);
+                let avail = ui.available_height();
+                let workspace_h = (avail * 0.42).clamp(220.0, 400.0);
+                egui::TopBottomPanel::bottom("workspace-panel")
+                    .resizable(false)
+                    .exact_height(workspace_h)
+                    .frame(egui::Frame::side_top_panel(&ctx.style())
+                        .inner_margin(egui::Margin::symmetric(4, 8)))
+                    .show_inside(ui, |ui| {
+                        self.workspace_panel(ui);
+                    });
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    self.settings_panel(ui);
+                });
             });
 
+        // Right side: results + export.
+        egui::SidePanel::right("results-panel")
+            .resizable(true)
+            .default_width(290.0)
+            .frame(side_frame)
+            .show(ctx, |ui| {
+                self.results_panel(ui);
+            });
+
+        // Status bar
         egui::TopBottomPanel::bottom("statusbar").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.label(&self.status);
                 ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
-                    let (i, n) = self.progress;
-                    if n > 0 {
-                        ui.label(format!("{i}/{n}"));
-                        let pct = if n > 0 { i as f32 / n as f32 } else { 0.0 };
-                        ui.add(egui::ProgressBar::new(pct).desired_width(180.0));
+                    if self.in_progress && self.progress.folder_total > 0 {
+                        let p = self.progress;
+                        let frac_folder = if p.frame_total > 0 {
+                            p.frame_idx as f32 / p.frame_total as f32
+                        } else { 0.0 };
+                        let frac_total =
+                            (p.folder_idx as f32 + frac_folder) / p.folder_total as f32;
+                        ui.label(format!(
+                            "{}/{} folder · {}/{} frame",
+                            p.folder_idx + 1, p.folder_total,
+                            p.frame_idx + 1, p.frame_total,
+                        ));
+                        ui.add(egui::ProgressBar::new(frac_total).desired_width(180.0));
                     }
                 });
             });
@@ -549,27 +757,24 @@ impl eframe::App for AppState {
     }
 }
 
-impl AppState {
-    fn left_panel(&mut self, ui: &mut egui::Ui) {
-        ui.heading("BSnoBS — Rust");
+// -------------------------------------------------------------------
+// Panels
+// -------------------------------------------------------------------
 
-        if let Some(d) = &self.image_dir {
-            ui.label(format!("Folder: {}", d.display()));
-            ui.label(format!("{} images", self.image_files.len()));
-        } else {
-            ui.label(egui::RichText::new("no folder selected").italics());
-        }
-        if ui.button("Select folder…").clicked() {
-            self.pick_folder();
-        }
+impl AppState {
+    fn settings_panel(&mut self, ui: &mut egui::Ui) {
+        ui.heading("BSnoBS");
         ui.separator();
 
-        // ---- Model panel
         egui::CollapsingHeader::new("Model")
-            .default_open(true)
+            .default_open(false)
             .show(ui, |ui| {
-                let tag = if self.using_bundled { "bundled (default)" } else { "custom" };
-                ui.label(format!("{tag}: {}", self.weights_path.display()));
+                if self.using_bundled {
+                    let kb = crate::inference::BUNDLED_WEIGHTS.len() as f64 / 1024.0;
+                    ui.label(format!("bundled (embedded in binary, {:.0} KB)", kb));
+                } else {
+                    ui.label(format!("custom: {}", self.weights_path.display()));
+                }
                 ui.horizontal(|ui| {
                     if ui.button("Pick .onnx…").clicked() { self.pick_weights(); }
                     if ui.button("Use bundled").clicked() { self.reset_weights(); }
@@ -602,7 +807,6 @@ impl AppState {
             });
         ui.separator();
 
-        // ---- Detection panel
         egui::CollapsingHeader::new("Detection")
             .default_open(true)
             .show(ui, |ui| {
@@ -616,7 +820,6 @@ impl AppState {
             });
         ui.separator();
 
-        // ---- Physics panel
         egui::CollapsingHeader::new("Physics")
             .default_open(true)
             .show(ui, |ui| {
@@ -639,7 +842,6 @@ impl AppState {
             });
         ui.separator();
 
-        // ---- Static dirt panel
         egui::CollapsingHeader::new("Static dirt rejection")
             .default_open(true)
             .show(ui, |ui| {
@@ -657,65 +859,260 @@ impl AppState {
                     ui.add(egui::DragValue::new(&mut self.static_cfg.diameter_tol_frac).speed(0.05));
                 });
             });
+    }
+
+    fn workspace_panel(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.heading("Workspace");
+            ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("−").on_hover_text("Remove selected").clicked() {
+                    self.remove_selected_folder();
+                }
+                if ui.button("+").on_hover_text("Add folder…").clicked() {
+                    self.add_folder();
+                }
+            });
+        });
         ui.separator();
 
-        let can_run = self.image_dir.is_some() && self.analyzer.is_some() && !self.in_progress;
-        let run_text = if self.in_progress { "Running…" } else { "Run inference" };
-        if ui.add_enabled(can_run, egui::Button::new(run_text)).clicked() {
-            self.start_run();
-        }
+        let list_h = (ui.available_height() - 48.0).max(60.0);
+        egui::ScrollArea::vertical()
+            .id_salt("workspace-list")
+            .max_height(list_h)
+            .show(ui, |ui| {
+                if self.workspace.is_empty() {
+                    ui.label(egui::RichText::new("(no folders — click +)").italics().weak());
+                }
+                let mut select_idx: Option<usize> = None;
+                for (i, w) in self.workspace.iter_mut().enumerate() {
+                    let row = ui.horizontal(|ui| {
+                        ui.checkbox(&mut w.run_enabled, "");
+                        let selected = self.workspace_selected == Some(i);
+                        let resp = ui.selectable_label(
+                            selected,
+                            format!("{}  ({})", w.name, w.image_files.len()),
+                        );
+                        if resp.clicked() {
+                            select_idx = Some(i);
+                        }
+                        resp
+                    });
+                    let _ = row;
+                }
+                if let Some(i) = select_idx {
+                    self.workspace_selected = Some(i);
+                }
+            });
 
-        let can_export = self.results.is_some();
-        if ui.add_enabled(can_export, egui::Button::new("Export results…")).clicked() {
-            self.export_results();
-        }
+        ui.add_space(10.0);
+        let can_run = self.analyzer.is_some()
+            && !self.in_progress
+            && self.workspace.iter().any(|w| w.run_enabled);
+        let run_text = if self.in_progress { "Running…" } else { "RUN" };
+        ui.vertical_centered(|ui| {
+            ui.scope(|ui| {
+                let visuals = &mut ui.style_mut().visuals;
+                visuals.widgets.inactive.weak_bg_fill = Color32::from_rgb(46, 160, 67);
+                visuals.widgets.hovered.weak_bg_fill = Color32::from_rgb(60, 180, 80);
+                visuals.widgets.active.weak_bg_fill = Color32::from_rgb(40, 140, 60);
+                let btn_w = (ui.available_width() * 0.7).clamp(140.0, 240.0);
+                let button = egui::Button::new(
+                    egui::RichText::new(run_text).strong().color(Color32::WHITE).size(16.0),
+                )
+                .min_size(Vec2::new(btn_w, 38.0));
+                if ui.add_enabled(can_run, button).clicked() {
+                    self.start_run();
+                }
+            });
+        });
+        ui.add_space(8.0);
+    }
 
-        if let Some(r) = &self.results {
-            ui.separator();
-            ui.monospace(format!(
-                "Frames        : {}\n\
-                 Accepted      : {}\n\
-                 Rejected      : {}",
-                r.frames.len(),
-                r.total_bubbles(),
-                r.total_rejected(),
-            ));
-            let diams = r.diameters_valid();
-            if !diams.is_empty() {
-                let mean: f32 = diams.iter().sum::<f32>() / diams.len() as f32;
-                let mut sorted = diams.clone();
-                sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                let median = sorted[sorted.len() / 2];
-                ui.monospace(format!(
-                    "Mean diameter : {:.2} μm\n\
-                     Median diam   : {:.2} μm",
-                    mean, median
-                ));
+    fn results_panel(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(4.0);
+        ui.heading("Results");
+        ui.separator();
+
+        let avail_h = ui.available_height();
+        let list_h = (avail_h - 80.0).max(120.0);
+
+        egui::ScrollArea::vertical()
+            .id_salt("results-list")
+            .max_height(list_h)
+            .show(ui, |ui| {
+                if self.results_list.is_empty() {
+                    ui.label(egui::RichText::new("(no results yet)").italics().weak());
+                }
+                let mut focus_change: Option<usize> = None;
+                for (i, r) in self.results_list.iter_mut().enumerate() {
+                    ui.horizontal(|ui| {
+                        ui.checkbox(&mut r.visible, "");
+                        let focused = self.focused_result == Some(i);
+                        let label = egui::RichText::new(&r.name).strong();
+                        let label = if focused { label.background_color(Color32::from_rgb(255, 240, 130)).color(Color32::BLACK) } else { label };
+                        if ui.selectable_label(focused, label).clicked() {
+                            focus_change = Some(i);
+                        }
+                    });
+                    let n_static = r.results.frames.iter()
+                        .flat_map(|f| f.bubbles.iter())
+                        .filter(|b| b.is_static)
+                        .count();
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "  frames: {}, bubbles: {}, rejected: {}, static: {}",
+                            r.results.frames.len(),
+                            r.results.total_bubbles(),
+                            r.results.total_rejected(),
+                            n_static,
+                        ))
+                        .small()
+                        .monospace(),
+                    );
+                    let diams = r.results.diameters_valid();
+                    if !diams.is_empty() {
+                        let mean: f32 = diams.iter().sum::<f32>() / diams.len() as f32;
+                        let mut sorted = diams.clone();
+                        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                        let median = sorted[sorted.len() / 2];
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "  mean: {:.2} μm, median: {:.2} μm", mean, median,
+                            ))
+                            .small()
+                            .monospace(),
+                        );
+                    }
+                    ui.separator();
+                }
+                if let Some(i) = focus_change {
+                    self.focused_result = Some(i);
+                    self.current_frame = 0;
+                    self.texture = None;
+                    self.texture_for = None;
+                }
+            });
+
+        ui.add_space(12.0);
+        let can_export =
+            self.results_list.iter().any(|r| r.visible) && !self.in_progress;
+        ui.vertical_centered(|ui| {
+            let btn_w = (ui.available_width() * 0.7).clamp(140.0, 220.0);
+            let btn = egui::Button::new(egui::RichText::new("Export…").strong().size(15.0))
+                .min_size(Vec2::new(btn_w, 32.0));
+            if ui.add_enabled(can_export, btn).clicked() {
+                self.export_visible_results();
             }
-        }
+        });
+        ui.add_space(6.0);
     }
 
     fn center_panel(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        let n_frames = self.results.as_ref().map(|r| r.frames.len()).unwrap_or(0);
+        let focus_idx = self.focused_result;
+        let n_frames = focus_idx
+            .and_then(|i| self.results_list.get(i))
+            .map(|r| r.results.frames.len())
+            .unwrap_or(0);
+
+        // Top row: zoom controls
+        ui.horizontal(|ui| {
+            ui.label("Zoom");
+            ui.add(
+                egui::DragValue::new(&mut self.zoom)
+                    .speed(0.05)
+                    .range(0.1..=10.0)
+                    .max_decimals(2),
+            );
+            if ui.button("−").clicked() { self.zoom = (self.zoom * 0.8).max(0.1); }
+            if ui.button("+").clicked() { self.zoom = (self.zoom * 1.25).min(10.0); }
+            if ui.button("Fit").clicked() { self.zoom = 1.0; }
+            ui.separator();
+            if let Some(r) = self.focused_results() {
+                ui.label(format!("{}  ({} frames)", r.name, r.results.frames.len()));
+            } else {
+                ui.label(egui::RichText::new("no result selected").italics().weak());
+            }
+        });
+        ui.separator();
+
+        // Reserve bottom strip for the slider so the image fills the rest.
+        let slider_h = 32.0;
+        let total = ui.available_size();
+        let image_size = Vec2::new(total.x, (total.y - slider_h - 4.0).max(50.0));
+        let (image_rect, _) = ui.allocate_exact_size(image_size, Sense::hover());
+
+        self.ensure_frame_texture(ctx);
+
+        let painter = ui.painter_at(image_rect);
+        painter.rect_filled(image_rect, 0.0, Color32::from_gray(20));
+
+        if let (Some(focus_idx), Some(tex)) = (focus_idx, self.texture.clone()) {
+            if let Some(res) = self.results_list.get(focus_idx) {
+                if !res.results.frames.is_empty() {
+                    let frame = &res.results.frames[self.current_frame];
+                    let img_size = tex.size_vec2();
+                    let fit_scale =
+                        (image_rect.width() / img_size.x).min(image_rect.height() / img_size.y);
+                    let scale = fit_scale * self.zoom;
+                    let disp = img_size * scale;
+                    let pos = Pos2::new(
+                        image_rect.center().x - disp.x * 0.5,
+                        image_rect.center().y - disp.y * 0.5,
+                    );
+                    let target_rect = Rect::from_min_size(pos, disp);
+                    painter.image(
+                        tex.id(),
+                        target_rect,
+                        Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
+                        Color32::WHITE,
+                    );
+                    draw_overlays(
+                        &painter,
+                        target_rect,
+                        scale,
+                        frame,
+                        res.results.parameters.scale_um_per_pixel,
+                    );
+                }
+            }
+        } else if focus_idx.is_none() {
+            painter.text(
+                image_rect.center(),
+                egui::Align2::CENTER_CENTER,
+                if self.results_list.is_empty() {
+                    "Add folders to the workspace, then click RUN."
+                } else {
+                    "Pick a result on the right to view it."
+                },
+                egui::FontId::proportional(16.0),
+                Color32::from_gray(180),
+            );
+        }
+
+        // Bottom row: slider
         ui.horizontal(|ui| {
             if ui.button("◀").clicked() && self.current_frame > 0 {
                 self.current_frame -= 1;
             }
-            let mut idx = self.current_frame as i64;
             if n_frames > 0 {
-                ui.add(Slider::new(&mut idx, 0..=(n_frames as i64 - 1)).show_value(true));
-                self.current_frame = idx.clamp(0, n_frames as i64 - 1) as usize;
+                let mut idx = self.current_frame as i64;
+                let max = (n_frames as i64 - 1).max(0);
+                ui.add(
+                    Slider::new(&mut idx, 0..=max)
+                        .show_value(true)
+                        .clamping(egui::SliderClamping::Always),
+                );
+                self.current_frame = idx.clamp(0, max) as usize;
             } else {
-                ui.label("(no frames)");
+                ui.add_enabled(false, Slider::new(&mut 0i64, 0..=0));
             }
             if ui.button("▶").clicked() && n_frames > 0 && self.current_frame + 1 < n_frames {
                 self.current_frame += 1;
             }
-            ui.label(if n_frames > 0 {
-                format!("{}/{}", self.current_frame + 1, n_frames)
-            } else {
-                "—/—".into()
-            });
+            if n_frames > 0 {
+                ui.label(format!("{}/{}", self.current_frame + 1, n_frames));
+            }
         });
 
         // Keyboard navigation
@@ -727,49 +1124,12 @@ impl AppState {
             if next && self.current_frame + 1 < n_frames { self.current_frame += 1; }
             if prev && self.current_frame > 0 { self.current_frame -= 1; }
         }
-
-        self.ensure_frame_texture(ctx);
-        ui.separator();
-
-        if let Some(res) = self.results.as_ref() {
-            if let Some(tex) = self.texture.clone() {
-                let frame = &res.frames[self.current_frame];
-                let avail = ui.available_size();
-                let img_size = tex.size_vec2();
-                let scale = (avail.x / img_size.x)
-                    .min(avail.y / img_size.y)
-                    .min(self.zoom);
-                let disp = img_size * scale;
-                let (rect, resp) = ui.allocate_exact_size(disp, Sense::hover());
-                let painter = ui.painter_at(rect);
-                // image
-                painter.image(
-                    tex.id(),
-                    rect,
-                    Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
-                    Color32::WHITE,
-                );
-                draw_overlays(&painter, rect, scale, frame, res.parameters.scale_um_per_pixel);
-
-                // Per-frame stats
-                ui.with_layout(Layout::left_to_right(egui::Align::Center), |ui| {
-                    let n_static = frame.bubbles.iter().filter(|b| b.is_static).count();
-                    ui.monospace(format!(
-                        "frame: {}   valid: {}   rejected: {}   static: {}",
-                        frame.frame_name, frame.num_valid, frame.num_rejected, n_static,
-                    ));
-                });
-                let _ = resp;
-            } else {
-                ui.label("Loading image…");
-            }
-        } else {
-            ui.centered_and_justified(|ui| {
-                ui.heading("Pick a folder, load the model, then click Run.");
-            });
-        }
     }
 }
+
+// -------------------------------------------------------------------
+// Overlay drawing
+// -------------------------------------------------------------------
 
 fn draw_overlays(
     painter: &egui::Painter,
@@ -793,12 +1153,9 @@ fn draw_overlays(
         };
         let stroke = Stroke::new(1.5, color);
         if dashed {
-            // crude dash: draw shorter arcs
             let n = 24;
             for k in 0..n {
-                if k % 2 == 1 {
-                    continue;
-                }
+                if k % 2 == 1 { continue; }
                 let a0 = (k as f32 / n as f32) * std::f32::consts::TAU;
                 let a1 = ((k + 1) as f32 / n as f32) * std::f32::consts::TAU;
                 let p0 = Pos2::new(cx + r * a0.cos(), cy + r * a0.sin());
@@ -819,4 +1176,3 @@ fn draw_overlays(
         }
     }
 }
-

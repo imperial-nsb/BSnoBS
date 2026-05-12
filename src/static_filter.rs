@@ -19,6 +19,7 @@ impl Default for StaticFilterConfig {
     }
 }
 
+#[derive(Default, Clone, Copy)]
 pub struct FilterSummary {
     pub n_rejected: usize,
     pub n_clusters: usize,
@@ -27,7 +28,7 @@ pub struct FilterSummary {
 pub fn apply(results: &mut AnalysisResults, cfg: &StaticFilterConfig) -> FilterSummary {
     let n_frames = results.frames.len();
     if n_frames == 0 {
-        return FilterSummary { n_rejected: 0, n_clusters: 0 };
+        return FilterSummary::default();
     }
 
     // Collect (frame_idx, bubble_idx) for currently-valid detections.
@@ -40,7 +41,7 @@ pub fn apply(results: &mut AnalysisResults, cfg: &StaticFilterConfig) -> FilterS
         }
     }
     if items.is_empty() {
-        return FilterSummary { n_rejected: 0, n_clusters: 0 };
+        return FilterSummary::default();
     }
 
     let threshold = (cfg.min_frame_frac * n_frames as f32).ceil() as usize;

@@ -17,6 +17,9 @@ use crate::types::{AnalysisParameters, BubbleData, FrameResult};
 
 pub const INPUT_SIZE: u32 = 640;
 
+/// Bundled student weights, embedded in the binary at compile time.
+pub const BUNDLED_WEIGHTS: &[u8] = include_bytes!("../assets/student.onnx");
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Device {
     Auto,
@@ -39,7 +42,7 @@ pub struct StudentAnalyzer {
 }
 
 impl StudentAnalyzer {
-    pub fn load(weights: &Path, device: Device) -> Result<Self> {
+    fn build(device: Device) -> Result<ort::session::builder::SessionBuilder> {
         let mut builder = Session::builder()?;
         let providers = match device {
             Device::Cpu => vec![CPUExecutionProvider::default().build()],
@@ -49,9 +52,20 @@ impl StudentAnalyzer {
             ],
         };
         builder = builder.with_execution_providers(providers)?;
-        let session = builder
+        Ok(builder)
+    }
+
+    pub fn load(weights: &Path, device: Device) -> Result<Self> {
+        let session = Self::build(device)?
             .commit_from_file(weights)
             .with_context(|| format!("loading ONNX model from {}", weights.display()))?;
+        Ok(Self { session })
+    }
+
+    pub fn load_from_bytes(bytes: &[u8], device: Device) -> Result<Self> {
+        let session = Self::build(device)?
+            .commit_from_memory(bytes)
+            .context("loading ONNX model from embedded bytes")?;
         Ok(Self { session })
     }
 
@@ -125,7 +139,6 @@ impl StudentAnalyzer {
         }
 
         Ok(FrameResult {
-            frame_name,
             image_path: image_path.to_path_buf(),
             num_valid,
             num_rejected,

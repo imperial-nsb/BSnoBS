@@ -16,7 +16,6 @@ pub struct BubbleData {
 
 #[derive(Clone, Debug)]
 pub struct FrameResult {
-    pub frame_name: String,
     pub image_path: PathBuf,
     pub num_valid: usize,
     pub num_rejected: usize,
