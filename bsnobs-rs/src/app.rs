@@ -26,6 +26,9 @@ pub struct AppState {
     analyzer: Option<StudentAnalyzer>,
     model_status: String,
     model_load_time_ms: Option<u128>,
+    model_loading: bool,
+    model_load_start: Option<Instant>,
+    model_load_rx: Option<mpsc::Receiver<Result<StudentAnalyzer, String>>>,
 
     // Settings
     params: AnalysisParameters,
@@ -85,7 +88,7 @@ fn bundled_weights() -> PathBuf {
 impl AppState {
     pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
         let weights = bundled_weights();
-        Self {
+        let mut s = Self {
             image_dir: None,
             image_files: Vec::new(),
             using_bundled: true,
@@ -95,6 +98,9 @@ impl AppState {
             analyzer: None,
             model_status: "Not loaded.".into(),
             model_load_time_ms: None,
+            model_loading: false,
+            model_load_start: None,
+            model_load_rx: None,
 
             params: AnalysisParameters::default(),
             conf: 0.55,
@@ -115,16 +121,38 @@ impl AppState {
             progress: (0, 0),
             status: "Pick a folder of microscopy images to begin.".into(),
             start_time: Instant::now(),
-        }
+        };
+        // Auto-load the bundled model on startup.
+        s.start_model_load();
+        s
     }
 
-    fn load_model(&mut self) {
-        self.model_status = "Loading…".into();
-        let t = Instant::now();
-        match StudentAnalyzer::load(&self.weights_path, self.device) {
-            Ok(a) => {
-                self.analyzer = Some(a);
-                let ms = t.elapsed().as_millis();
+    fn start_model_load(&mut self) {
+        if self.model_loading { return; }
+        self.analyzer = None;
+        self.model_load_time_ms = None;
+        self.model_status = "Loading model…".into();
+        self.model_loading = true;
+        self.model_load_start = Some(Instant::now());
+
+        let (tx, rx) = mpsc::channel();
+        self.model_load_rx = Some(rx);
+        let weights = self.weights_path.clone();
+        let device = self.device;
+        thread::spawn(move || {
+            let result = StudentAnalyzer::load(&weights, device).map_err(|e| e.to_string());
+            let _ = tx.send(result);
+        });
+    }
+
+    fn drain_model_load(&mut self, _ctx: &egui::Context) {
+        if self.model_load_rx.is_none() { return; }
+        let maybe = self.model_load_rx.as_ref().unwrap().try_recv();
+        match maybe {
+            Ok(Ok(analyzer)) => {
+                let ms = self.model_load_start
+                    .map(|t| t.elapsed().as_millis()).unwrap_or(0);
+                self.analyzer = Some(analyzer);
                 self.model_load_time_ms = Some(ms);
                 self.model_status = format!(
                     "Loaded.\nDevice: {}\nLoad time: {} ms",
@@ -132,12 +160,20 @@ impl AppState {
                     ms
                 );
                 self.status = format!("Model loaded in {ms} ms.");
+                self.model_loading = false;
+                self.model_load_rx = None;
             }
-            Err(e) => {
-                self.analyzer = None;
-                self.model_load_time_ms = None;
+            Ok(Err(e)) => {
                 self.model_status = format!("Load failed: {e}");
                 self.status = format!("Model load failed: {e}");
+                self.model_loading = false;
+                self.model_load_rx = None;
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.model_status = "Load failed: worker died.".into();
+                self.model_loading = false;
+                self.model_load_rx = None;
             }
         }
     }
@@ -268,14 +304,14 @@ impl AppState {
                     self.in_progress = false;
                     self.worker_rx = None;
                     // Reload analyzer for subsequent runs.
-                    self.load_model();
+                    self.start_model_load();
                 }
                 WorkerMsg::Failed(err) => {
                     self.status = format!("Inference failed: {err}");
                     self.in_progress = false;
                     self.worker_rx = None;
                     // Still try to reload model for next attempt.
-                    self.load_model();
+                    self.start_model_load();
                 }
             }
         }
@@ -407,6 +443,11 @@ fn write_metadata(
 impl eframe::App for AppState {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.drain_worker(ctx);
+        self.drain_model_load(ctx);
+        if self.model_loading {
+            // Repaint frequently so the spinner animates and the elapsed counter ticks.
+            ctx.request_repaint_after(std::time::Duration::from_millis(50));
+        }
 
         egui::SidePanel::left("settings")
             .resizable(true)
@@ -478,10 +519,23 @@ impl AppState {
                         });
                 });
                 let btn_text = if self.analyzer.is_some() { "Reload model" } else { "Load model" };
-                if ui.button(btn_text).clicked() {
-                    self.load_model();
+                let load_enabled = !self.model_loading;
+                if ui.add_enabled(load_enabled, egui::Button::new(btn_text)).clicked() {
+                    self.start_model_load();
                 }
-                ui.label(&self.model_status);
+                if self.model_loading {
+                    let elapsed_ms = self
+                        .model_load_start
+                        .map(|t| t.elapsed().as_millis())
+                        .unwrap_or(0);
+                    ui.horizontal(|ui| {
+                        ui.add(egui::Spinner::new());
+                        ui.label(format!("Loading model… {} ms", elapsed_ms));
+                    });
+                    ui.add(egui::ProgressBar::new(0.0).animate(true));
+                } else {
+                    ui.label(&self.model_status);
+                }
             });
         ui.separator();
 
