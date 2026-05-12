@@ -740,22 +740,6 @@ impl eframe::App for AppState {
         egui::TopBottomPanel::bottom("statusbar").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.label(&self.status);
-                ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
-                    if self.in_progress && self.progress.folder_total > 0 {
-                        let p = self.progress;
-                        let frac_folder = if p.frame_total > 0 {
-                            p.frame_idx as f32 / p.frame_total as f32
-                        } else { 0.0 };
-                        let frac_total =
-                            (p.folder_idx as f32 + frac_folder) / p.folder_total as f32;
-                        ui.label(format!(
-                            "{}/{} folder · {}/{} frame",
-                            p.folder_idx + 1, p.folder_total,
-                            p.frame_idx + 1, p.frame_total,
-                        ));
-                        ui.add(egui::ProgressBar::new(frac_total).desired_width(180.0));
-                    }
-                });
             });
         });
 
@@ -1200,6 +1184,38 @@ impl AppState {
             ));
             if next && self.current_frame + 1 < n_frames { self.current_frame += 1; }
             if prev && self.current_frame > 0 { self.current_frame -= 1; }
+        }
+
+        // Inference progress overlay
+        if self.in_progress && self.progress.folder_total > 0 {
+            let p = self.progress;
+            let frac_folder = if p.frame_total > 0 {
+                p.frame_idx as f32 / p.frame_total as f32
+            } else { 0.0 };
+            let frac_total =
+                (p.folder_idx as f32 + frac_folder) / p.folder_total as f32;
+
+            egui::Area::new(egui::Id::new("inference-progress"))
+                .order(egui::Order::Foreground)
+                .pivot(egui::Align2::CENTER_CENTER)
+                .current_pos(image_rect.center())
+                .interactable(false)
+                .show(ctx, |ui| {
+                    egui::Frame::popup(ui.style())
+                        .inner_margin(egui::Margin::same(24))
+                        .show(ui, |ui| {
+                            ui.vertical_centered(|ui| {
+                                ui.label(egui::RichText::new("Running Inference").heading().strong());
+                                ui.add_space(8.0);
+                                ui.label(format!(
+                                    "{}/{} folder · {}/{} frame",
+                                    p.folder_idx + 1, p.folder_total,
+                                    p.frame_idx + 1, p.frame_total,
+                                ));
+                                ui.add(egui::ProgressBar::new(frac_total).desired_width(240.0));
+                            });
+                        });
+                });
         }
     }
 }
