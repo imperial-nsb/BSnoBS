@@ -56,8 +56,8 @@ pub struct AppState {
 
 enum WorkerMsg {
     Progress(usize, usize, String),
-    Done(AnalysisResults),
-    Failed(String),
+    Done(AnalysisResults, StudentAnalyzer),
+    Failed(String, StudentAnalyzer),
 }
 
 fn bundled_weights() -> PathBuf {
@@ -293,7 +293,10 @@ impl AppState {
                 match analyzer.predict_image(path, &params, conf, iou, max_det) {
                     Ok(frame) => results.frames.push(frame),
                     Err(e) => {
-                        let _ = tx.send(WorkerMsg::Failed(format!("{}: {}", path.display(), e)));
+                        let _ = tx.send(WorkerMsg::Failed(
+                            format!("{}: {}", path.display(), e),
+                            analyzer,
+                        ));
                         return;
                     }
                 }
@@ -310,7 +313,7 @@ impl AppState {
                     ),
                 ));
             }
-            let _ = tx.send(WorkerMsg::Done(results));
+            let _ = tx.send(WorkerMsg::Done(results, analyzer));
         });
     }
 
@@ -329,7 +332,7 @@ impl AppState {
                     self.progress = (i, n);
                     self.status = format!("[{i}/{n}] {name}");
                 }
-                WorkerMsg::Done(results) => {
+                WorkerMsg::Done(results, analyzer) => {
                     let elapsed = self.start_time.elapsed().as_millis();
                     self.status = format!(
                         "Done — {} bubbles across {} frames in {} ms",
@@ -343,15 +346,13 @@ impl AppState {
                     self.texture_for_frame = None;
                     self.in_progress = false;
                     self.worker_rx = None;
-                    // Reload analyzer for subsequent runs.
-                    self.start_model_load();
+                    self.analyzer = Some(analyzer);
                 }
-                WorkerMsg::Failed(err) => {
+                WorkerMsg::Failed(err, analyzer) => {
                     self.status = format!("Inference failed: {err}");
                     self.in_progress = false;
                     self.worker_rx = None;
-                    // Still try to reload model for next attempt.
-                    self.start_model_load();
+                    self.analyzer = Some(analyzer);
                 }
             }
         }
