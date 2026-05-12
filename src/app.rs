@@ -86,8 +86,12 @@ pub struct AppState {
     pan: Vec2,
     bw_mode: bool,
     show_overlays: bool,
+    show_bubbles: bool,
+    show_rejected: bool,
+    show_static: bool,
     edit_mode: bool,
-    hovered_bubble: Option<usize>, // bubble index within current frame
+    hovered_bubble: Option<usize>,
+    suppress_hover_bubble: Option<usize>,
 
     // Worker
     worker_rx: Option<mpsc::Receiver<WorkerMsg>>,
@@ -178,8 +182,12 @@ impl AppState {
             pan: Vec2::ZERO,
             bw_mode: false,
             show_overlays: true,
+            show_bubbles: true,
+            show_rejected: true,
+            show_static: true,
             edit_mode: false,
             hovered_bubble: None,
+            suppress_hover_bubble: None,
 
             worker_rx: None,
             in_progress: false,
@@ -957,6 +965,13 @@ impl AppState {
                 });
                 ui.checkbox(&mut self.bw_mode, "B&W mode");
                 ui.checkbox(&mut self.show_overlays, "Show overlays");
+                if self.show_overlays {
+                    ui.indent("overlay-sub", |ui| {
+                        ui.checkbox(&mut self.show_bubbles, "Bubbles");
+                        ui.checkbox(&mut self.show_rejected, "Rejected");
+                        ui.checkbox(&mut self.show_static, "Static");
+                    });
+                }
                 let has_results = self.focused_result
                     .and_then(|i| self.results_list.get(i))
                     .map(|r| !r.results.frames.is_empty())
@@ -1090,30 +1105,30 @@ impl AppState {
 
         // ---- Interaction: scroll-zoom around cursor, drag to pan,
         //      double-click to reset ----
-        if !self.edit_mode {
-            if image_resp.hovered() {
-                let (raw_scroll, zoom_delta, modifiers, pointer) = ui.input(|i| (
-                    i.smooth_scroll_delta,
-                    i.zoom_delta(),
-                    i.modifiers,
-                    i.pointer.hover_pos(),
-                ));
-                let scroll_factor = if raw_scroll.y.abs() > 0.0 {
-                    let step = if modifiers.shift_only() { 0.002 } else { 0.005 };
-                    (raw_scroll.y * step).exp()
-                } else {
-                    1.0
-                };
-                let factor = scroll_factor * zoom_delta;
-                if (factor - 1.0).abs() > 1e-4 {
-                    let pivot = pointer.unwrap_or(image_rect.center());
-                    let new_zoom = (self.zoom * factor).clamp(0.2, 8.0);
-                    let r = new_zoom / self.zoom;
-                    let v = pivot - image_rect.center();
-                    self.pan = v * (1.0 - r) + self.pan * r;
-                    self.zoom = new_zoom;
-                }
+        if image_resp.hovered() {
+            let (raw_scroll, zoom_delta, modifiers, pointer) = ui.input(|i| (
+                i.smooth_scroll_delta,
+                i.zoom_delta(),
+                i.modifiers,
+                i.pointer.hover_pos(),
+            ));
+            let scroll_factor = if raw_scroll.y.abs() > 0.0 {
+                let step = if modifiers.shift_only() { 0.002 } else { 0.005 };
+                (raw_scroll.y * step).exp()
+            } else {
+                1.0
+            };
+            let factor = scroll_factor * zoom_delta;
+            if (factor - 1.0).abs() > 1e-4 {
+                let pivot = pointer.unwrap_or(image_rect.center());
+                let new_zoom = (self.zoom * factor).clamp(0.2, 8.0);
+                let r = new_zoom / self.zoom;
+                let v = pivot - image_rect.center();
+                self.pan = v * (1.0 - r) + self.pan * r;
+                self.zoom = new_zoom;
             }
+        }
+        if !self.edit_mode || self.hovered_bubble.is_none() {
             if image_resp.dragged() {
                 self.pan += image_resp.drag_delta();
             }
@@ -1153,10 +1168,13 @@ impl AppState {
                             res.results.parameters.scale_um_per_pixel,
                             self.edit_mode,
                             self.hovered_bubble,
+                            self.show_bubbles,
+                            self.show_rejected,
+                            self.show_static,
                         );
                     }
 
-                    // ---- Edit mode: hit-test + highlight + click-to-remove ----
+                    // ---- Edit mode: hit-test + click-to-reject/accept ----
                     if self.edit_mode {
                         let um_per_pixel = res.results.parameters.scale_um_per_pixel;
                         let pointer = ui.input(|i| i.pointer.hover_pos());
@@ -1180,16 +1198,31 @@ impl AppState {
                         }
                         self.hovered_bubble = closest.map(|(i, _)| i);
 
+                        // Suppress hover on the bubble we just clicked until cursor leaves it
+                        if let Some(suppressed) = self.suppress_hover_bubble {
+                            if self.hovered_bubble == Some(suppressed) {
+                                self.hovered_bubble = None;
+                            } else {
+                                self.suppress_hover_bubble = None;
+                            }
+                        }
+
                         if image_resp.clicked() {
                             if let Some(bi) = self.hovered_bubble {
-                                // Remove the bubble from results
                                 if let Some(res) = self.results_list.get_mut(focus_idx) {
                                     let frame = &mut res.results.frames[self.current_frame];
-                                    frame.bubbles.remove(bi);
-                                    // Recount valid/rejected
+                                    if let Some(bubble) = frame.bubbles.get_mut(bi) {
+                                        if bubble.is_valid {
+                                            bubble.is_valid = false;
+                                        } else {
+                                            bubble.is_valid = true;
+                                            bubble.is_static = false;
+                                        }
+                                    }
                                     frame.num_valid = frame.bubbles.iter().filter(|b| b.is_valid).count();
                                     frame.num_rejected = frame.bubbles.iter().filter(|b| !b.is_valid).count();
                                 }
+                                self.suppress_hover_bubble = Some(bi);
                                 self.hovered_bubble = None;
                             }
                         }
@@ -1300,17 +1333,32 @@ fn draw_overlays(
     um_per_pixel: f32,
     edit_mode: bool,
     hovered_bubble: Option<usize>,
+    show_bubbles: bool,
+    show_rejected: bool,
+    show_static: bool,
 ) {
     let origin = rect.min;
     for (bi, b) in frame.bubbles.iter().enumerate() {
+        let is_hovered = edit_mode && hovered_bubble == Some(bi);
+
+        // Skip based on sub-toggles (but always draw hovered bubble)
+        if !is_hovered {
+            if b.is_static && !show_static { continue; }
+            if !b.is_static && b.is_valid && !show_bubbles { continue; }
+            if !b.is_static && !b.is_valid && !show_rejected { continue; }
+        }
+
         let cx = origin.x + b.centroid_x * scale;
         let cy = origin.y + b.centroid_y * scale;
         let r_px = (b.diameter_um / 2.0) / um_per_pixel;
         let r = r_px * scale;
 
-        let is_hovered = edit_mode && hovered_bubble == Some(bi);
+        // Hover: red+× for valid (reject), green+✓ for rejected/static (accept)
+        let hover_is_accept = is_hovered && !b.is_valid;
 
-        let (color, dashed) = if is_hovered {
+        let (color, dashed) = if is_hovered && hover_is_accept {
+            (Color32::from_rgb(0, 230, 118), false)
+        } else if is_hovered {
             (Color32::from_rgb(255, 40, 40), false)
         } else if b.is_static {
             (Color32::from_rgb(255, 234, 0), true)
@@ -1337,19 +1385,36 @@ fn draw_overlays(
         }
 
         if is_hovered {
-            // Fill with translucent red
-            painter.circle_filled(Pos2::new(cx, cy), r, Color32::from_rgba_unmultiplied(255, 40, 40, 50));
-            // Draw × in center
-            let x_size = r.min(12.0).max(4.0);
-            let x_stroke = Stroke::new(2.0, Color32::from_rgb(255, 40, 40));
-            painter.line_segment(
-                [Pos2::new(cx - x_size, cy - x_size), Pos2::new(cx + x_size, cy + x_size)],
-                x_stroke,
-            );
-            painter.line_segment(
-                [Pos2::new(cx + x_size, cy - x_size), Pos2::new(cx - x_size, cy + x_size)],
-                x_stroke,
-            );
+            let fill_color = if hover_is_accept {
+                Color32::from_rgba_unmultiplied(0, 230, 118, 50)
+            } else {
+                Color32::from_rgba_unmultiplied(255, 40, 40, 50)
+            };
+            painter.circle_filled(Pos2::new(cx, cy), r, fill_color);
+
+            let mark_size = r.min(12.0).max(4.0);
+            let mark_stroke = Stroke::new(2.0, color);
+            if hover_is_accept {
+                // Draw ✓
+                painter.line_segment(
+                    [Pos2::new(cx - mark_size * 0.5, cy), Pos2::new(cx - mark_size * 0.1, cy + mark_size * 0.5)],
+                    mark_stroke,
+                );
+                painter.line_segment(
+                    [Pos2::new(cx - mark_size * 0.1, cy + mark_size * 0.5), Pos2::new(cx + mark_size * 0.5, cy - mark_size * 0.4)],
+                    mark_stroke,
+                );
+            } else {
+                // Draw ×
+                painter.line_segment(
+                    [Pos2::new(cx - mark_size, cy - mark_size), Pos2::new(cx + mark_size, cy + mark_size)],
+                    mark_stroke,
+                );
+                painter.line_segment(
+                    [Pos2::new(cx + mark_size, cy - mark_size), Pos2::new(cx - mark_size, cy + mark_size)],
+                    mark_stroke,
+                );
+            }
         } else if b.is_valid {
             painter.text(
                 Pos2::new(cx + r + 2.0, cy - r - 2.0),
