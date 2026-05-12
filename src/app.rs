@@ -818,16 +818,12 @@ impl eframe::App for AppState {
                         }
                     });
 
-                let max_settings_h = (ui.available_height() - 250.0).max(100.0);
-                egui::TopBottomPanel::bottom("settings-panel")
+                egui::TopBottomPanel::bottom("controls-panel")
                     .resizable(false)
-                    .height_range(0.0..=max_settings_h)
                     .frame(egui::Frame::side_top_panel(&ctx.style())
-                        .inner_margin(egui::Margin::symmetric(4, 8)))
+                        .inner_margin(egui::Margin::symmetric(4, 6)))
                     .show_inside(ui, |ui| {
-                        egui::ScrollArea::vertical().show(ui, |ui| {
-                            self.settings_panel(ui);
-                        });
+                        self.controls_bar(ui);
                     });
 
                 egui::CentralPanel::default()
@@ -869,100 +865,168 @@ impl eframe::App for AppState {
 // -------------------------------------------------------------------
 
 impl AppState {
-    fn settings_panel(&mut self, ui: &mut egui::Ui) {
-        egui::CollapsingHeader::new("Model")
-            .default_open(false)
-            .show(ui, |ui| {
-                if self.using_bundled {
-                    let kb = crate::inference::BUNDLED_WEIGHTS.len() as f64 / 1024.0;
-                    ui.label(format!("bundled (embedded in binary, {:.0} KB)", kb));
-                } else {
-                    ui.label(format!("custom: {}", self.weights_path.display()));
-                }
-                ui.horizontal(|ui| {
-                    if ui.button("Pick .onnx…").clicked() { self.pick_weights(); }
-                    if ui.button("Use bundled").clicked() { self.reset_weights(); }
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Device:");
-                    egui::ComboBox::from_id_salt("device")
-                        .selected_text(self.device.label())
-                        .show_ui(ui, |ui| {
-                            for d in [Device::Auto, Device::Cpu, Device::CoreML] {
-                                if ui.selectable_label(self.device == d, d.label()).clicked() {
-                                    if self.device != d {
-                                        self.device = d;
-                                        self.analyzer = None;
-                                        self.model_status = "Not loaded.".into();
-                                        self.model_load_time_ms = None;
-                                    }
-                                }
+    fn model_section(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Model");
+        ui.separator();
+        if self.using_bundled {
+            let kb = crate::inference::BUNDLED_WEIGHTS.len() as f64 / 1024.0;
+            ui.label(format!("bundled (embedded in binary, {:.0} KB)", kb));
+        } else {
+            ui.label(format!("custom: {}", self.weights_path.display()));
+        }
+        ui.horizontal(|ui| {
+            if ui.button("Pick .onnx…").clicked() { self.pick_weights(); }
+            if ui.button("Use bundled").clicked() { self.reset_weights(); }
+        });
+        ui.horizontal(|ui| {
+            ui.label("Device:");
+            egui::ComboBox::from_id_salt("device")
+                .selected_text(self.device.label())
+                .show_ui(ui, |ui| {
+                    for d in [Device::Auto, Device::Cpu, Device::CoreML] {
+                        if ui.selectable_label(self.device == d, d.label()).clicked() {
+                            if self.device != d {
+                                self.device = d;
+                                self.analyzer = None;
+                                self.model_status = "Not loaded.".into();
+                                self.model_load_time_ms = None;
                             }
-                        });
+                        }
+                    }
                 });
-                let btn_text = if self.analyzer.is_some() { "Reload model" } else { "Load model" };
-                let load_enabled = !self.model_loading;
-                if ui.add_enabled(load_enabled, egui::Button::new(btn_text)).clicked() {
-                    self.start_model_load();
+        });
+        let btn_text = if self.analyzer.is_some() { "Reload model" } else { "Load model" };
+        let load_enabled = !self.model_loading;
+        if ui.add_enabled(load_enabled, egui::Button::new(btn_text)).clicked() {
+            self.start_model_load();
+        }
+        if !self.model_loading {
+            ui.label(&self.model_status);
+        }
+    }
+
+    fn detection_section(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Detection");
+        ui.separator();
+        ui.add(Slider::new(&mut self.conf, 0.01..=1.0).text("Confidence"));
+        ui.add(Slider::new(&mut self.iou, 0.05..=0.95).text("NMS IoU"));
+        ui.horizontal(|ui| {
+            ui.label("Max detections");
+            ui.add(egui::DragValue::new(&mut self.max_det).speed(10).range(10..=10_000));
+        });
+        ui.label(format!("Inference resolution: {}×{} (fixed)", self.imgsz, self.imgsz));
+    }
+
+    fn physics_section(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Physics");
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.label("Scale (μm/px)");
+            ui.add(egui::DragValue::new(&mut self.params.scale_um_per_pixel).speed(0.001).max_decimals(4));
+        });
+        ui.horizontal(|ui| {
+            ui.label("Volume (μL/frame)");
+            ui.add(egui::DragValue::new(&mut self.params.sample_volume_per_frame_ul).speed(0.00001).max_decimals(6));
+        });
+        ui.horizontal(|ui| {
+            ui.label("Min diam (μm)");
+            ui.add(egui::DragValue::new(&mut self.params.min_diameter_um).speed(0.1));
+        });
+        ui.horizontal(|ui| {
+            ui.label("Max diam (μm)");
+            ui.add(egui::DragValue::new(&mut self.params.max_diameter_um).speed(0.5));
+        });
+    }
+
+    fn static_section(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Static dirt rejection");
+        ui.separator();
+        ui.checkbox(&mut self.reject_static, "Reject persistent locations");
+        ui.horizontal(|ui| {
+            ui.label("Min frame frac");
+            ui.add(egui::DragValue::new(&mut self.static_cfg.min_frame_frac).speed(0.01).range(0.05..=1.0));
+        });
+        ui.horizontal(|ui| {
+            ui.label("Centroid tol (px)");
+            ui.add(egui::DragValue::new(&mut self.static_cfg.tol_px).speed(0.5));
+        });
+        ui.horizontal(|ui| {
+            ui.label("Diam tol");
+            ui.add(egui::DragValue::new(&mut self.static_cfg.diameter_tol_frac).speed(0.05));
+        });
+    }
+
+    fn run_button(&mut self, ui: &mut egui::Ui) {
+        fn any_enabled(entry: &WorkspaceEntry) -> bool {
+            (entry.run_enabled && !entry.image_files.is_empty()) || entry.children.iter().any(any_enabled)
+        }
+        let can_run = self.analyzer.is_some()
+            && !self.in_progress
+            && self.workspace.iter().any(any_enabled);
+        let run_text = if self.in_progress { "Running…" } else { "RUN" };
+        ui.vertical_centered(|ui| {
+            ui.scope(|ui| {
+                let visuals = &mut ui.style_mut().visuals;
+                visuals.widgets.inactive.weak_bg_fill = Color32::from_rgb(46, 160, 67);
+                visuals.widgets.hovered.weak_bg_fill = Color32::from_rgb(60, 180, 80);
+                visuals.widgets.active.weak_bg_fill = Color32::from_rgb(40, 140, 60);
+                let btn_w = (ui.available_width() * 0.7).clamp(140.0, 240.0);
+                let button = egui::Button::new(
+                    egui::RichText::new(run_text).strong().color(Color32::WHITE).size(16.0),
+                )
+                .min_size(Vec2::new(btn_w, 38.0));
+                if ui.add_enabled(can_run, button).clicked() {
+                    self.start_run();
                 }
-                if !self.model_loading {
-                    ui.label(&self.model_status);
-                }
             });
-        ui.separator();
+        });
+    }
 
-        egui::CollapsingHeader::new("Detection")
-            .default_open(true)
-            .show(ui, |ui| {
-                ui.add(Slider::new(&mut self.conf, 0.01..=1.0).text("Confidence"));
-                ui.add(Slider::new(&mut self.iou, 0.05..=0.95).text("NMS IoU"));
-                ui.horizontal(|ui| {
-                    ui.label("Max detections");
-                    ui.add(egui::DragValue::new(&mut self.max_det).speed(10).range(10..=10_000));
-                });
-                ui.label(format!("Inference resolution: {}×{} (fixed)", self.imgsz, self.imgsz));
-            });
-        ui.separator();
+    /// Bottom strip of the left side panel: a row of settings buttons that
+    /// each pop their content upward, with the Run button below.
+    fn controls_bar(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            let avail = ui.available_width();
+            let btn_w = (avail / 4.0 - 6.0).max(50.0);
 
-        egui::CollapsingHeader::new("Physics")
-            .default_open(true)
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label("Scale (μm/px)");
-                    ui.add(egui::DragValue::new(&mut self.params.scale_um_per_pixel).speed(0.001).max_decimals(4));
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Volume (μL/frame)");
-                    ui.add(egui::DragValue::new(&mut self.params.sample_volume_per_frame_ul).speed(0.00001).max_decimals(6));
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Min diam (μm)");
-                    ui.add(egui::DragValue::new(&mut self.params.min_diameter_um).speed(0.1));
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Max diam (μm)");
-                    ui.add(egui::DragValue::new(&mut self.params.max_diameter_um).speed(0.5));
-                });
-            });
-        ui.separator();
+            let make_btn = |ui: &mut egui::Ui, label: &str| -> egui::Response {
+                let popup_id = ui.make_persistent_id(("settings-popup", label));
+                let is_open = egui::Popup::is_id_open(ui.ctx(), popup_id);
+                ui.add_sized(
+                    Vec2::new(btn_w, 26.0),
+                    egui::Button::selectable(is_open, label),
+                )
+            };
 
-        egui::CollapsingHeader::new("Static dirt rejection")
-            .default_open(true)
-            .show(ui, |ui| {
-                ui.checkbox(&mut self.reject_static, "Reject persistent locations");
-                ui.horizontal(|ui| {
-                    ui.label("Min frame frac");
-                    ui.add(egui::DragValue::new(&mut self.static_cfg.min_frame_frac).speed(0.01).range(0.05..=1.0));
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Centroid tol (px)");
-                    ui.add(egui::DragValue::new(&mut self.static_cfg.tol_px).speed(0.5));
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Diam tol");
-                    ui.add(egui::DragValue::new(&mut self.static_cfg.diameter_tol_frac).speed(0.05));
-                });
-            });
+            let r = make_btn(ui, "Model");
+            egui::Popup::menu(&r)
+                .align(egui::RectAlign::TOP_START)
+                .width(280.0)
+                .show(|ui| { self.model_section(ui); });
+
+            let r = make_btn(ui, "Detection");
+            egui::Popup::menu(&r)
+                .align(egui::RectAlign::TOP_START)
+                .width(280.0)
+                .show(|ui| { self.detection_section(ui); });
+
+            let r = make_btn(ui, "Physics");
+            egui::Popup::menu(&r)
+                .align(egui::RectAlign::TOP_START)
+                .width(280.0)
+                .show(|ui| { self.physics_section(ui); });
+
+            let r = make_btn(ui, "Static");
+            egui::Popup::menu(&r)
+                .align(egui::RectAlign::TOP_START)
+                .width(280.0)
+                .show(|ui| { self.static_section(ui); });
+        });
+        ui.add_space(8.0);
+        self.run_button(ui);
+        ui.add_space(4.0);
     }
 
     fn render_workspace_node(ui: &mut egui::Ui, w: &mut WorkspaceEntry, remove_idx: &mut Option<usize>, my_idx: Option<usize>) {
@@ -1014,11 +1078,9 @@ impl AppState {
         });
         ui.separator();
 
-        let list_h = (ui.available_height() - 48.0).max(60.0);
         let mut remove_idx: Option<usize> = None;
         egui::ScrollArea::both()
             .id_salt("workspace-list")
-            .max_height(list_h)
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 if self.workspace.is_empty() {
@@ -1031,31 +1093,6 @@ impl AppState {
         if let Some(i) = remove_idx {
             self.workspace.remove(i);
         }
-
-        ui.add_space(10.0);
-        fn any_enabled(entry: &WorkspaceEntry) -> bool {
-            (entry.run_enabled && !entry.image_files.is_empty()) || entry.children.iter().any(any_enabled)
-        }
-        let can_run = self.analyzer.is_some()
-            && !self.in_progress
-            && self.workspace.iter().any(any_enabled);
-        let run_text = if self.in_progress { "Running…" } else { "RUN" };
-        ui.vertical_centered(|ui| {
-            ui.scope(|ui| {
-                let visuals = &mut ui.style_mut().visuals;
-                visuals.widgets.inactive.weak_bg_fill = Color32::from_rgb(46, 160, 67);
-                visuals.widgets.hovered.weak_bg_fill = Color32::from_rgb(60, 180, 80);
-                visuals.widgets.active.weak_bg_fill = Color32::from_rgb(40, 140, 60);
-                let btn_w = (ui.available_width() * 0.7).clamp(140.0, 240.0);
-                let button = egui::Button::new(
-                    egui::RichText::new(run_text).strong().color(Color32::WHITE).size(16.0),
-                )
-                .min_size(Vec2::new(btn_w, 38.0));
-                if ui.add_enabled(can_run, button).clicked() {
-                    self.start_run();
-                }
-            });
-        });
     }
 
     /// Draw a compact bar histogram of bubble diameters into `rect`.
