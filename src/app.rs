@@ -1002,11 +1002,11 @@ impl AppState {
             ui.add(
                 egui::DragValue::new(&mut self.zoom)
                     .speed(0.05)
-                    .range(0.1..=10.0)
+                    .range(0.2..=8.0)
                     .max_decimals(2),
             );
-            if ui.button("−").clicked() { self.zoom = (self.zoom * 0.8).max(0.1); }
-            if ui.button("+").clicked() { self.zoom = (self.zoom * 1.25).min(10.0); }
+            if ui.button("−").clicked() { self.zoom = (self.zoom * 0.8).max(0.2); }
+            if ui.button("+").clicked() { self.zoom = (self.zoom * 1.25).min(8.0); }
             if ui.button("Fit").clicked() { self.zoom = 1.0; self.pan = Vec2::ZERO; }
             ui.separator();
             if let Some(r) = self.focused_results() {
@@ -1036,7 +1036,7 @@ impl AppState {
                     .unwrap_or(image_rect.center());
                 let step = if modifiers.shift_only() { 0.002 } else { 0.005 };
                 let factor = (raw_scroll.y * step).exp();
-                let new_zoom = (self.zoom * factor).clamp(0.1, 20.0);
+                let new_zoom = (self.zoom * factor).clamp(0.2, 8.0);
                 let r = new_zoom / self.zoom;
                 let v = pivot - image_rect.center();
                 self.pan = v * (1.0 - r) + self.pan * r;
