@@ -10,7 +10,7 @@ use eframe::egui::{
 use image::ImageReader;
 
 use crate::exporter;
-use crate::inference::{list_images, Device, StudentAnalyzer, INPUT_SIZE};
+use crate::inference::{Device, StudentAnalyzer, INPUT_SIZE};
 use crate::static_filter::{self, StaticFilterConfig};
 use crate::types::{AnalysisParameters, AnalysisResults, FrameResult};
 
@@ -23,6 +23,20 @@ pub struct WorkspaceEntry {
     pub name: String,
     pub image_files: Vec<PathBuf>,
     pub run_enabled: bool,
+    pub children: Vec<WorkspaceEntry>,
+}
+
+impl WorkspaceEntry {
+    pub fn set_run_enabled_recursive(&mut self, enabled: bool) {
+        self.run_enabled = enabled;
+        for c in &mut self.children {
+            c.set_run_enabled_recursive(enabled);
+        }
+    }
+
+    pub fn total_images(&self) -> usize {
+        self.image_files.len() + self.children.iter().map(|c| c.total_images()).sum::<usize>()
+    }
 }
 
 pub struct ResultEntry {
@@ -355,25 +369,55 @@ impl AppState {
 
     // ------------- Workspace -------------
 
+    fn build_workspace_entry(dir: &Path, depth: usize) -> WorkspaceEntry {
+        let name = dir.file_name().and_then(|s| s.to_str()).unwrap_or("folder").to_string();
+        let mut image_files = Vec::new();
+        let mut children = Vec::new();
+
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file() {
+                    if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
+                        let l = ext.to_lowercase();
+                        if l == "tif" || l == "tiff" || l == "png" || l == "jpg" || l == "jpeg" {
+                            image_files.push(path);
+                        }
+                    }
+                } else if path.is_dir() && depth < 5 {
+                    let child_entry = Self::build_workspace_entry(&path, depth + 1);
+                    if !child_entry.image_files.is_empty() || !child_entry.children.is_empty() {
+                        children.push(child_entry);
+                    }
+                }
+            }
+        }
+
+        image_files.sort();
+        children.sort_by(|a, b| a.name.cmp(&b.name));
+
+        WorkspaceEntry {
+            path: dir.to_path_buf(),
+            name,
+            image_files,
+            run_enabled: true,
+            children,
+        }
+    }
+
     fn add_folder(&mut self) {
         if let Some(p) = rfd::FileDialog::new().pick_folder() {
             if self.workspace.iter().any(|w| w.path == p) {
                 self.status = format!("Already in workspace: {}", p.display());
                 return;
             }
-            let files = list_images(&p);
-            if files.is_empty() {
+            let entry = Self::build_workspace_entry(&p, 0);
+            if entry.image_files.is_empty() && entry.children.is_empty() {
                 self.status = format!("No images in {}", p.display());
                 return;
             }
-            let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("folder").to_string();
-            self.status = format!("Added {} ({} images)", name, files.len());
-            self.workspace.push(WorkspaceEntry {
-                path: p,
-                name,
-                image_files: files,
-                run_enabled: true,
-            });
+            self.status = format!("Added {} ({} images)", entry.name, entry.total_images());
+            self.workspace.push(entry);
         }
     }
 
@@ -382,12 +426,23 @@ impl AppState {
     fn start_run(&mut self) {
         if self.analyzer.is_none() { return; }
         if self.in_progress { return; }
-        let folders: Vec<(usize, PathBuf, String, Vec<PathBuf>)> = self
-            .workspace
-            .iter()
+        let mut flat_folders = Vec::new();
+        fn collect_folders(entry: &WorkspaceEntry, folders: &mut Vec<(PathBuf, String, Vec<PathBuf>)>) {
+            if entry.run_enabled && !entry.image_files.is_empty() {
+                folders.push((entry.path.clone(), entry.name.clone(), entry.image_files.clone()));
+            }
+            for c in &entry.children {
+                collect_folders(c, folders);
+            }
+        }
+        for w in &self.workspace {
+            collect_folders(w, &mut flat_folders);
+        }
+
+        let folders: Vec<(usize, PathBuf, String, Vec<PathBuf>)> = flat_folders
+            .into_iter()
             .enumerate()
-            .filter(|(_, w)| w.run_enabled && !w.image_files.is_empty())
-            .map(|(i, w)| (i, w.path.clone(), w.name.clone(), w.image_files.clone()))
+            .map(|(i, (p, n, f))| (i, p, n, f))
             .collect();
         if folders.is_empty() {
             self.status = "Nothing to run — tick at least one folder in the workspace.".into();
@@ -869,6 +924,43 @@ impl AppState {
             });
     }
 
+    fn render_workspace_node(ui: &mut egui::Ui, w: &mut WorkspaceEntry, remove_idx: &mut Option<usize>, my_idx: Option<usize>) {
+        ui.horizontal(|ui| {
+            let mut checked = w.run_enabled;
+            if ui.checkbox(&mut checked, "").changed() {
+                w.set_run_enabled_recursive(checked);
+            }
+
+            ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
+                if let Some(i) = my_idx {
+                    if ui.small_button("×").on_hover_text("Remove").clicked() {
+                        *remove_idx = Some(i);
+                    }
+                }
+                
+                ui.with_layout(Layout::left_to_right(egui::Align::Center), |ui| {
+                    if w.children.is_empty() {
+                        ui.label(format!("{}  ({})", w.name, w.image_files.len()));
+                    } else {
+                        let label = if w.image_files.is_empty() {
+                            format!("{}  ({} total)", w.name, w.total_images())
+                        } else {
+                            format!("{}  ({} here, {} total)", w.name, w.image_files.len(), w.total_images())
+                        };
+                        egui::CollapsingHeader::new(label)
+                            .id_salt(&w.path)
+                            .default_open(true)
+                            .show(ui, |ui| {
+                                for child in &mut w.children {
+                                    Self::render_workspace_node(ui, child, remove_idx, None);
+                                }
+                            });
+                    }
+                });
+            });
+        });
+    }
+
     fn workspace_panel(&mut self, ui: &mut egui::Ui) {
         ui.add_space(4.0);
         ui.horizontal(|ui| {
@@ -891,15 +983,7 @@ impl AppState {
                     ui.label(egui::RichText::new("(no folders — click +)").italics().weak());
                 }
                 for (i, w) in self.workspace.iter_mut().enumerate() {
-                    ui.horizontal(|ui| {
-                        ui.checkbox(&mut w.run_enabled, "");
-                        ui.label(format!("{}  ({})", w.name, w.image_files.len()));
-                        ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.small_button("×").on_hover_text("Remove").clicked() {
-                                remove_idx = Some(i);
-                            }
-                        });
-                    });
+                    Self::render_workspace_node(ui, w, &mut remove_idx, Some(i));
                 }
             });
         if let Some(i) = remove_idx {
@@ -907,9 +991,12 @@ impl AppState {
         }
 
         ui.add_space(10.0);
+        fn any_enabled(entry: &WorkspaceEntry) -> bool {
+            (entry.run_enabled && !entry.image_files.is_empty()) || entry.children.iter().any(any_enabled)
+        }
         let can_run = self.analyzer.is_some()
             && !self.in_progress
-            && self.workspace.iter().any(|w| w.run_enabled);
+            && self.workspace.iter().any(any_enabled);
         let run_text = if self.in_progress { "Running…" } else { "RUN" };
         ui.vertical_centered(|ui| {
             ui.scope(|ui| {

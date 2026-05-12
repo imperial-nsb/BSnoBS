@@ -2,7 +2,7 @@
 //!
 //! Mirrors the math used by `bsnobs.infer.StudentAnalyzer`.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Context, Result};
 use image::{DynamicImage, GenericImageView, ImageReader};
@@ -227,25 +227,3 @@ fn iou(a: &Det, b: &Det) -> f32 {
     if union <= 0.0 { 0.0 } else { inter / union }
 }
 
-pub fn list_images(dir: &Path) -> Vec<PathBuf> {
-    for pat in ["tif", "tiff", "png", "jpg", "jpeg"] {
-        let mut hits: Vec<PathBuf> = std::fs::read_dir(dir)
-            .ok()
-            .into_iter()
-            .flatten()
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .filter(|p| {
-                p.extension()
-                    .and_then(|s| s.to_str())
-                    .map(|s| s.eq_ignore_ascii_case(pat))
-                    .unwrap_or(false)
-            })
-            .collect();
-        if !hits.is_empty() {
-            hits.sort();
-            return hits;
-        }
-    }
-    Vec::new()
-}
