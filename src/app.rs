@@ -180,7 +180,7 @@ impl AppState {
             texture_for: None,
             zoom: 1.0,
             pan: Vec2::ZERO,
-            bw_mode: false,
+            bw_mode: true,
             show_overlays: true,
             show_bubbles: true,
             show_rejected: true,
@@ -965,20 +965,14 @@ impl AppState {
                 });
                 ui.checkbox(&mut self.bw_mode, "B&W mode");
                 ui.checkbox(&mut self.show_overlays, "Show overlays");
-                if self.show_overlays {
+                ui.add_enabled_ui(self.show_overlays, |ui| {
                     ui.indent("overlay-sub", |ui| {
                         ui.checkbox(&mut self.show_bubbles, "Accepted");
                         ui.checkbox(&mut self.show_rejected, "Rejected");
                         ui.checkbox(&mut self.show_static, "Static");
                     });
-                }
-                let has_results = self.focused_result
-                    .and_then(|i| self.results_list.get(i))
-                    .map(|r| !r.results.frames.is_empty())
-                    .unwrap_or(false);
-                ui.add_enabled_ui(has_results, |ui| {
-                    ui.checkbox(&mut self.edit_mode, "✏ Edit mode");
                 });
+
 
                 if let Some(i) = focus_change {
                     self.focused_result = Some(i);
@@ -1074,10 +1068,10 @@ impl AppState {
             ui.add(
                 egui::DragValue::new(&mut self.zoom)
                     .speed(0.05)
-                    .range(0.2..=8.0)
+                    .range(1.0..=8.0)
                     .max_decimals(2),
             );
-            if ui.button("−").clicked() { self.zoom = (self.zoom * 0.8).max(0.2); }
+            if ui.button("−").clicked() { self.zoom = (self.zoom * 0.8).max(1.0); }
             if ui.button("+").clicked() { self.zoom = (self.zoom * 1.25).min(8.0); }
             if ui.button("Fit").clicked() { self.zoom = 1.0; self.pan = Vec2::ZERO; }
             ui.separator();
@@ -1086,6 +1080,13 @@ impl AppState {
             } else {
                 ui.label(egui::RichText::new("no result selected").italics().weak());
             }
+            ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
+                let has_results = self.focused_result
+                    .and_then(|i| self.results_list.get(i))
+                    .map(|r| !r.results.frames.is_empty())
+                    .unwrap_or(false);
+                ui.add_enabled(has_results, egui::Checkbox::new(&mut self.edit_mode, "✏ Edit"));
+            });
         });
         ui.separator();
 
@@ -1121,7 +1122,7 @@ impl AppState {
             let factor = scroll_factor * zoom_delta;
             if (factor - 1.0).abs() > 1e-4 {
                 let pivot = pointer.unwrap_or(image_rect.center());
-                let new_zoom = (self.zoom * factor).clamp(0.2, 8.0);
+                let new_zoom = (self.zoom * factor).clamp(1.0, 8.0);
                 let r = new_zoom / self.zoom;
                 let v = pivot - image_rect.center();
                 self.pan = v * (1.0 - r) + self.pan * r;
@@ -1132,14 +1133,33 @@ impl AppState {
             if image_resp.dragged() {
                 self.pan += image_resp.drag_delta();
             }
-            if image_resp.double_clicked() {
+            let dbl = ui.input(|i| {
+                i.pointer.button_double_clicked(egui::PointerButton::Primary)
+                    && i.pointer.interact_pos()
+                        .map(|p| image_rect.contains(p))
+                        .unwrap_or(false)
+            });
+            if dbl {
                 self.zoom = 1.0;
                 self.pan = Vec2::ZERO;
+            }
+        }
+        if image_resp.secondary_clicked() {
+            let has_results = self.focused_result
+                .and_then(|i| self.results_list.get(i))
+                .map(|r| !r.results.frames.is_empty())
+                .unwrap_or(false);
+            if has_results {
+                self.edit_mode = !self.edit_mode;
             }
         }
 
         let painter = ui.painter_at(image_rect);
         painter.rect_filled(image_rect, 0.0, Color32::from_gray(20));
+
+
+
+
 
         if let (Some(focus_idx), Some(tex)) = (focus_idx, self.texture.clone()) {
             if let Some(res) = self.results_list.get(focus_idx) {
@@ -1159,6 +1179,13 @@ impl AppState {
                         Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
                         Color32::WHITE,
                     );
+                    if self.edit_mode {
+                        painter.rect_stroke(
+                            target_rect, 0.0,
+                            Stroke::new(2.0, Color32::from_rgb(255, 165, 0)),
+                            egui::StrokeKind::Inside,
+                        );
+                    }
                     if self.show_overlays {
                         draw_overlays(
                             &painter,
@@ -1286,6 +1313,9 @@ impl AppState {
             if next && self.current_frame + 1 < n_frames { self.current_frame += 1; }
             if prev && self.current_frame > 0 { self.current_frame -= 1; }
         }
+        if ui.input(|i| i.key_pressed(egui::Key::S)) {
+            self.show_overlays = !self.show_overlays;
+        }
 
         // Inference progress overlay
         if self.in_progress && self.progress.folder_total > 0 {
@@ -1357,18 +1387,18 @@ fn draw_overlays(
         let hover_is_accept = is_hovered && !b.is_valid;
 
         let (color, dashed) = if is_hovered && hover_is_accept {
-            (Color32::from_rgb(0, 230, 118), false)
+            (Color32::from_rgb(0, 200, 0), false)
         } else if is_hovered {
             (Color32::from_rgb(255, 40, 40), false)
         } else if b.is_static {
             (Color32::from_rgb(255, 234, 0), true)
         } else if b.is_valid {
-            (Color32::from_rgb(0, 230, 118), false)
+            (Color32::from_rgb(0, 200, 0), false)
         } else {
             (Color32::from_rgb(255, 23, 68), false)
         };
 
-        let stroke_w = if is_hovered { 2.5 } else { 1.5 };
+        let stroke_w = if is_hovered { 3.0 } else { 2.0 };
         let stroke = Stroke::new(stroke_w, color);
         if dashed {
             let n = 24;
@@ -1386,7 +1416,7 @@ fn draw_overlays(
 
         if is_hovered {
             let fill_color = if hover_is_accept {
-                Color32::from_rgba_unmultiplied(0, 230, 118, 50)
+                Color32::from_rgba_unmultiplied(0, 200, 0, 50)
             } else {
                 Color32::from_rgba_unmultiplied(255, 40, 40, 50)
             };
@@ -1417,8 +1447,8 @@ fn draw_overlays(
             }
         } else if b.is_valid {
             painter.text(
-                Pos2::new(cx + r + 2.0, cy - r - 2.0),
-                egui::Align2::LEFT_BOTTOM,
+                Pos2::new(cx, cy),
+                egui::Align2::CENTER_CENTER,
                 format!("{:.1}", b.diameter_um),
                 egui::FontId::monospace(9.0),
                 color,
