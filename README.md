@@ -1,4 +1,4 @@
-# BSNOBS — BubSize NO BS
+# BSnoBS — BubSize no BS
 
 Microbubble sizing from optical microscopy using a tiny distilled YOLO student. No Cellpose dependency — just the student model.
 

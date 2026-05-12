@@ -33,7 +33,7 @@ from .static_filter import StaticFilterConfig, apply_static_filter
 console = Console()
 app = typer.Typer(
     name="bsnobs",
-    help="BubSize NO BS — microbubble sizing from optical microscopy (YOLO student).",
+    help="BSnoBS — BubSize no BS. Microbubble sizing from optical microscopy (YOLO student).",
     add_completion=False,
 )
 
@@ -342,7 +342,7 @@ def gui_cmd():
 def _print_header():
     console.print()
     console.print(Panel(
-        "[bold white]bsnobs[/bold white]  [dim]microbubble sizing · YOLO student[/dim]",
+        "[bold white]BSnoBS[/bold white]  [dim]microbubble sizing · YOLO student[/dim]",
         expand=False, border_style="bright_cyan", padding=(0, 2),
     ))
     console.print()

@@ -1,4 +1,4 @@
-"""BSNOBS PySide6 GUI."""
+"""BSnoBS PySide6 GUI."""
 from __future__ import annotations
 
 import json
@@ -45,7 +45,7 @@ def _available_devices() -> list[str]:
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("BSNOBS — BubSize NO BS")
+        self.setWindowTitle("BSnoBS — BubSize no BS")
         self.resize(1400, 900)
 
         self._image_dir: Optional[Path] = None

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "bsnobs"
 version = "0.1.0"
-description = "BubSize NO BS — microbubble sizing from optical microscopy with a tiny YOLO student. CLI + PySide6 GUI."
+description = "BSnoBS — BubSize no BS. Microbubble sizing from optical microscopy with a tiny YOLO student. CLI + PySide6 GUI."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }

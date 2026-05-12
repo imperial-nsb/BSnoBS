@@ -224,7 +224,15 @@ impl AppState {
             }
             let _ = tx.send(WorkerMsg::Progress(n, n, "done".into()));
             if reject_static {
-                static_filter::apply(&mut results, &static_cfg);
+                let s = static_filter::apply(&mut results, &static_cfg);
+                let _ = tx.send(WorkerMsg::Progress(
+                    n,
+                    n,
+                    format!(
+                        "static filter: {} detections across {} persistent locations",
+                        s.n_rejected, s.n_clusters
+                    ),
+                ));
             }
             let _ = tx.send(WorkerMsg::Done(results));
         });
@@ -373,7 +381,7 @@ fn write_metadata(
         },
         "physics": {
             "scale_um_per_pixel": app.params.scale_um_per_pixel,
-            "sample_volume_per_frame_uL": app.params.sample_volume_per_frame_uL,
+            "sample_volume_per_frame_uL": app.params.sample_volume_per_frame_ul,
             "min_diameter_um": app.params.min_diameter_um,
             "max_diameter_um": app.params.max_diameter_um,
         },
@@ -429,7 +437,7 @@ impl eframe::App for AppState {
 
 impl AppState {
     fn left_panel(&mut self, ui: &mut egui::Ui) {
-        ui.heading("BSNOBS — Rust");
+        ui.heading("BSnoBS — Rust");
 
         if let Some(d) = &self.image_dir {
             ui.label(format!("Folder: {}", d.display()));
@@ -501,7 +509,7 @@ impl AppState {
                 });
                 ui.horizontal(|ui| {
                     ui.label("Volume (μL/frame)");
-                    ui.add(egui::DragValue::new(&mut self.params.sample_volume_per_frame_uL).speed(0.00001).max_decimals(6));
+                    ui.add(egui::DragValue::new(&mut self.params.sample_volume_per_frame_ul).speed(0.00001).max_decimals(6));
                 });
                 ui.horizontal(|ui| {
                     ui.label("Min diam (μm)");

@@ -38,8 +38,10 @@ struct Summary {
     std_diameter_um: f32,
     min_diameter_um: f32,
     max_diameter_um: f32,
-    concentration_per_uL: f32,
-    total_sample_volume_uL: f32,
+    #[serde(rename = "concentration_per_uL")]
+    concentration_per_ul: f32,
+    #[serde(rename = "total_sample_volume_uL")]
+    total_sample_volume_ul: f32,
 }
 
 pub fn export(results: &AnalysisResults, out_dir: &Path) -> Result<()> {
@@ -97,7 +99,7 @@ pub fn export(results: &AnalysisResults, out_dir: &Path) -> Result<()> {
         .filter(|b| b.is_static)
         .count();
 
-    let total_vol_uL = results.parameters.sample_volume_per_frame_uL
+    let total_vol_ul = results.parameters.sample_volume_per_frame_ul
         * results.frames.len() as f32;
 
     let (mean, std, median, min, max) = if n_valid == 0 {
@@ -126,12 +128,12 @@ pub fn export(results: &AnalysisResults, out_dir: &Path) -> Result<()> {
         std_diameter_um: std,
         min_diameter_um: min,
         max_diameter_um: max,
-        concentration_per_uL: if total_vol_uL > 0.0 {
-            results.total_bubbles() as f32 / total_vol_uL
+        concentration_per_ul: if total_vol_ul > 0.0 {
+            results.total_bubbles() as f32 / total_vol_ul
         } else {
             0.0
         },
-        total_sample_volume_uL: total_vol_uL,
+        total_sample_volume_ul: total_vol_ul,
     };
     std::fs::write(
         out_dir.join(format!("{sample}_summary.json")),

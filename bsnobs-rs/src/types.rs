@@ -26,7 +26,8 @@ pub struct FrameResult {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AnalysisParameters {
     pub scale_um_per_pixel: f32,
-    pub sample_volume_per_frame_uL: f32,
+    #[serde(rename = "sample_volume_per_frame_uL")]
+    pub sample_volume_per_frame_ul: f32,
     pub min_diameter_um: f32,
     pub max_diameter_um: f32,
     pub bin_size_um: f32,
@@ -36,7 +37,7 @@ impl Default for AnalysisParameters {
     fn default() -> Self {
         Self {
             scale_um_per_pixel: 0.0825,
-            sample_volume_per_frame_uL: 0.00089,
+            sample_volume_per_frame_ul: 0.00089,
             min_diameter_um: 0.5,
             max_diameter_um: 20.0,
             bin_size_um: 0.165,
