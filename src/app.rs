@@ -447,19 +447,30 @@ impl AppState {
     }
 
     fn add_folder(&mut self) {
-        if let Some(p) = rfd::FileDialog::new().pick_folder() {
+        let Some(paths) = rfd::FileDialog::new().pick_folders() else { return };
+        let mut added = 0usize;
+        let mut total_images = 0usize;
+        let mut skipped: Vec<String> = Vec::new();
+        for p in paths {
             if self.workspace.iter().any(|w| w.path == p) {
-                self.status = format!("Already in workspace: {}", p.display());
-                return;
+                skipped.push(format!("already in workspace: {}", p.display()));
+                continue;
             }
             let entry = Self::build_workspace_entry(&p, 0);
             if entry.image_files.is_empty() && entry.children.is_empty() {
-                self.status = format!("No images in {}", p.display());
-                return;
+                skipped.push(format!("no images in {}", p.display()));
+                continue;
             }
-            self.status = format!("Added {} ({} images)", entry.name, entry.total_images());
+            total_images += entry.total_images();
+            added += 1;
             self.workspace.push(entry);
         }
+        self.status = match (added, skipped.is_empty()) {
+            (0, false) => skipped.join("; "),
+            (0, true) => return,
+            (n, true) => format!("Added {n} folder(s), {total_images} images"),
+            (n, false) => format!("Added {n} folder(s), {total_images} images ({})", skipped.join("; ")),
+        };
     }
 
     // ------------- Run -------------
