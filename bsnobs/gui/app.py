@@ -137,9 +137,10 @@ class MainWindow(QMainWindow):
         det_form = QFormLayout(det_box)
         self.s_conf = QDoubleSpinBox(); self.s_conf.setRange(0.01, 1.0); self.s_conf.setSingleStep(0.05); self.s_conf.setValue(0.55); self.s_conf.setDecimals(2)
         self.s_imgsz = QSpinBox(); self.s_imgsz.setRange(128, 2048); self.s_imgsz.setSingleStep(32); self.s_imgsz.setValue(640)
+        self.s_imgsz.setToolTip("Resolution images are resized to before YOLO runs (in px, on the long edge). Higher = slower but may find smaller bubbles.")
         self.s_max_det = QSpinBox(); self.s_max_det.setRange(10, 10000); self.s_max_det.setSingleStep(100); self.s_max_det.setValue(1000)
         det_form.addRow("Confidence", self.s_conf)
-        det_form.addRow("Image size", self.s_imgsz)
+        det_form.addRow("Inference resolution (px)", self.s_imgsz)
         det_form.addRow("Max detections", self.s_max_det)
         layout.addWidget(det_box)
 
