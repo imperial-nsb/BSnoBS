@@ -449,7 +449,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "bsnobs-rs"
+name = "bsnobs"
 version = "0.1.0"
 dependencies = [
  "anyhow",

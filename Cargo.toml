@@ -1,11 +1,11 @@
 [package]
-name = "bsnobs-rs"
+name = "bsnobs"
 version = "0.1.0"
 edition = "2021"
-description = "BubSize NO BS — Rust GUI for microbubble sizing (YOLO + ONNX Runtime)"
+description = "BSnoBS — BubSize no BS. Microbubble sizing from optical microscopy (YOLO + ONNX Runtime)."
 
 [[bin]]
-name = "bsnobs-rs"
+name = "bsnobs"
 path = "src/main.rs"
 
 [dependencies]
