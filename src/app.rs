@@ -1180,11 +1180,14 @@ impl AppState {
                         Color32::WHITE,
                     );
                     if self.edit_mode {
-                        painter.rect_stroke(
-                            target_rect, 0.0,
-                            Stroke::new(2.0, Color32::from_rgb(255, 165, 0)),
-                            egui::StrokeKind::Inside,
-                        );
+                        let border_rect = target_rect.intersect(image_rect);
+                        if border_rect.is_positive() {
+                            painter.rect_stroke(
+                                border_rect, 0.0,
+                                Stroke::new(2.0, Color32::from_rgb(255, 165, 0)),
+                                egui::StrokeKind::Inside,
+                            );
+                        }
                     }
                     if self.show_overlays {
                         draw_overlays(
@@ -1315,6 +1318,15 @@ impl AppState {
         }
         if ui.input(|i| i.key_pressed(egui::Key::S)) {
             self.show_overlays = !self.show_overlays;
+        }
+        if ui.input(|i| i.key_pressed(egui::Key::E)) {
+            let has_results = self.focused_result
+                .and_then(|i| self.results_list.get(i))
+                .map(|r| !r.results.frames.is_empty())
+                .unwrap_or(false);
+            if has_results {
+                self.edit_mode = !self.edit_mode;
+            }
         }
 
         // Inference progress overlay
