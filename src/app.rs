@@ -1029,13 +1029,21 @@ impl AppState {
         // ---- Interaction: scroll-zoom around cursor, drag to pan,
         //      double-click to reset ----
         if image_resp.hovered() {
-            let (raw_scroll, modifiers) =
-                ui.input(|i| (i.smooth_scroll_delta, i.modifiers));
-            if raw_scroll.y.abs() > 0.0 {
-                let pivot = ui.input(|i| i.pointer.hover_pos())
-                    .unwrap_or(image_rect.center());
+            let (raw_scroll, zoom_delta, modifiers, pointer) = ui.input(|i| (
+                i.smooth_scroll_delta,
+                i.zoom_delta(),
+                i.modifiers,
+                i.pointer.hover_pos(),
+            ));
+            let scroll_factor = if raw_scroll.y.abs() > 0.0 {
                 let step = if modifiers.shift_only() { 0.002 } else { 0.005 };
-                let factor = (raw_scroll.y * step).exp();
+                (raw_scroll.y * step).exp()
+            } else {
+                1.0
+            };
+            let factor = scroll_factor * zoom_delta;
+            if (factor - 1.0).abs() > 1e-4 {
+                let pivot = pointer.unwrap_or(image_rect.center());
                 let new_zoom = (self.zoom * factor).clamp(0.2, 8.0);
                 let r = new_zoom / self.zoom;
                 let v = pivot - image_rect.center();
