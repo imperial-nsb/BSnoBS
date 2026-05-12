@@ -78,6 +78,7 @@ pub struct AppState {
     resolved_device: Option<Device>,
 
     // Settings
+    open_settings: Option<SettingsSection>,
     params: AnalysisParameters,
     conf: f32,
     imgsz: u32,
@@ -114,6 +115,14 @@ pub struct AppState {
     progress: RunProgress,
     status: String,
     start_time: Instant,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum SettingsSection {
+    Model,
+    Detection,
+    Physics,
+    Static,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -190,6 +199,7 @@ impl AppState {
             model_load_rx: None,
             resolved_device: None,
 
+            open_settings: None,
             params: AnalysisParameters::default(),
             conf: 0.55,
             imgsz: INPUT_SIZE,
@@ -866,8 +876,6 @@ impl eframe::App for AppState {
 
 impl AppState {
     fn model_section(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Model");
-        ui.separator();
         if self.using_bundled {
             let kb = crate::inference::BUNDLED_WEIGHTS.len() as f64 / 1024.0;
             ui.label(format!("bundled (embedded in binary, {:.0} KB)", kb));
@@ -906,8 +914,6 @@ impl AppState {
     }
 
     fn detection_section(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Detection");
-        ui.separator();
         ui.add(Slider::new(&mut self.conf, 0.01..=1.0).text("Confidence"));
         ui.add(Slider::new(&mut self.iou, 0.05..=0.95).text("NMS IoU"));
         ui.horizontal(|ui| {
@@ -918,8 +924,6 @@ impl AppState {
     }
 
     fn physics_section(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Physics");
-        ui.separator();
         ui.horizontal(|ui| {
             ui.label("Scale (μm/px)");
             ui.add(egui::DragValue::new(&mut self.params.scale_um_per_pixel).speed(0.001).max_decimals(4));
@@ -939,8 +943,6 @@ impl AppState {
     }
 
     fn static_section(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Static dirt rejection");
-        ui.separator();
         ui.checkbox(&mut self.reject_static, "Reject persistent locations");
         ui.horizontal(|ui| {
             ui.label("Min frame frac");
@@ -982,48 +984,36 @@ impl AppState {
         });
     }
 
-    /// Bottom strip of the left side panel: a row of settings buttons that
-    /// each pop their content upward, with the Run button below.
+    /// Bottom strip of the left side panel: a stack of standard
+    /// collapsing-header sections above the Run button. Because the
+    /// panel is bottom-anchored, expanding one section grows the
+    /// panel upward, squeezing the workspace tree above rather than
+    /// pushing the Run button down.
     fn controls_bar(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 4.0;
-            let avail = ui.available_width();
-            let btn_w = (avail / 4.0 - 6.0).max(50.0);
-
-            let make_btn = |ui: &mut egui::Ui, label: &str| -> egui::Response {
-                let popup_id = ui.make_persistent_id(("settings-popup", label));
-                let is_open = egui::Popup::is_id_open(ui.ctx(), popup_id);
-                ui.add_sized(
-                    Vec2::new(btn_w, 26.0),
-                    egui::Button::selectable(is_open, label),
-                )
-            };
-
-            let r = make_btn(ui, "Model");
-            egui::Popup::menu(&r)
-                .align(egui::RectAlign::TOP_START)
-                .width(280.0)
-                .show(|ui| { self.model_section(ui); });
-
-            let r = make_btn(ui, "Detection");
-            egui::Popup::menu(&r)
-                .align(egui::RectAlign::TOP_START)
-                .width(280.0)
-                .show(|ui| { self.detection_section(ui); });
-
-            let r = make_btn(ui, "Physics");
-            egui::Popup::menu(&r)
-                .align(egui::RectAlign::TOP_START)
-                .width(280.0)
-                .show(|ui| { self.physics_section(ui); });
-
-            let r = make_btn(ui, "Static");
-            egui::Popup::menu(&r)
-                .align(egui::RectAlign::TOP_START)
-                .width(280.0)
-                .show(|ui| { self.static_section(ui); });
-        });
+        let sections = [
+            (SettingsSection::Model, "Model"),
+            (SettingsSection::Detection, "Detection"),
+            (SettingsSection::Physics, "Physics"),
+            (SettingsSection::Static, "Static dirt rejection"),
+        ];
+        for (section, label) in sections {
+            let is_open = self.open_settings == Some(section);
+            let resp = egui::CollapsingHeader::new(label)
+                .id_salt(("section", section))
+                .open(Some(is_open))
+                .show(ui, |ui| {
+                    match section {
+                        SettingsSection::Model => self.model_section(ui),
+                        SettingsSection::Detection => self.detection_section(ui),
+                        SettingsSection::Physics => self.physics_section(ui),
+                        SettingsSection::Static => self.static_section(ui),
+                    }
+                })
+                .header_response;
+            if resp.clicked() {
+                self.open_settings = if is_open { None } else { Some(section) };
+            }
+        }
         ui.add_space(8.0);
         self.run_button(ui);
         ui.add_space(4.0);
