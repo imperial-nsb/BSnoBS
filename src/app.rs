@@ -967,7 +967,7 @@ impl AppState {
                 ui.checkbox(&mut self.show_overlays, "Show overlays");
                 if self.show_overlays {
                     ui.indent("overlay-sub", |ui| {
-                        ui.checkbox(&mut self.show_bubbles, "Bubbles");
+                        ui.checkbox(&mut self.show_bubbles, "Accepted");
                         ui.checkbox(&mut self.show_rejected, "Rejected");
                         ui.checkbox(&mut self.show_static, "Static");
                     });
