@@ -145,6 +145,46 @@ impl AppState {
         });
     }
 
+    fn show_loading_overlay(&self, ctx: &egui::Context) {
+        let screen = ctx.screen_rect();
+        let painter = ctx.layer_painter(egui::LayerId::new(
+            egui::Order::Foreground,
+            egui::Id::new("loading-dim"),
+        ));
+        painter.rect_filled(screen, 0.0, Color32::from_black_alpha(160));
+
+        let elapsed_ms = self
+            .model_load_start
+            .map(|t| t.elapsed().as_millis())
+            .unwrap_or(0);
+
+        egui::Area::new(egui::Id::new("loading-overlay"))
+            .order(egui::Order::Foreground)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .interactable(false)
+            .show(ctx, |ui| {
+                egui::Frame::popup(ui.style())
+                    .inner_margin(egui::Margin::same(24))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.add(egui::Spinner::new().size(28.0));
+                            ui.vertical(|ui| {
+                                ui.label(
+                                    egui::RichText::new("Loading model…")
+                                        .heading()
+                                        .strong(),
+                                );
+                                ui.label(
+                                    egui::RichText::new(format!("{} ms", elapsed_ms))
+                                        .monospace()
+                                        .weak(),
+                                );
+                            });
+                        });
+                    });
+            });
+    }
+
     fn drain_model_load(&mut self, _ctx: &egui::Context) {
         if self.model_load_rx.is_none() { return; }
         let maybe = self.model_load_rx.as_ref().unwrap().try_recv();
@@ -473,6 +513,10 @@ impl eframe::App for AppState {
         egui::CentralPanel::default().show(ctx, |ui| {
             self.center_panel(ui, ctx);
         });
+
+        if self.model_loading {
+            self.show_loading_overlay(ctx);
+        }
     }
 }
 
@@ -523,17 +567,7 @@ impl AppState {
                 if ui.add_enabled(load_enabled, egui::Button::new(btn_text)).clicked() {
                     self.start_model_load();
                 }
-                if self.model_loading {
-                    let elapsed_ms = self
-                        .model_load_start
-                        .map(|t| t.elapsed().as_millis())
-                        .unwrap_or(0);
-                    ui.horizontal(|ui| {
-                        ui.add(egui::Spinner::new());
-                        ui.label(format!("Loading model… {} ms", elapsed_ms));
-                    });
-                    ui.add(egui::ProgressBar::new(0.0).animate(true));
-                } else {
+                if !self.model_loading {
                     ui.label(&self.model_status);
                 }
             });
