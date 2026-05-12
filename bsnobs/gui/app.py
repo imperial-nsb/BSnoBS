@@ -27,6 +27,21 @@ from .viewer import FrameViewer
 from .worker import InferenceWorker
 
 
+def _available_devices() -> list[str]:
+    """Probe torch for actually-available devices. Always includes auto + cpu."""
+    devices = ["auto", "cpu"]
+    try:
+        import torch
+        if torch.backends.mps.is_available() and torch.backends.mps.is_built():
+            devices.append("mps")
+        if torch.cuda.is_available():
+            for i in range(torch.cuda.device_count()):
+                devices.append(str(i))
+    except Exception:
+        pass
+    return devices
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -101,7 +116,7 @@ class MainWindow(QMainWindow):
 
         device_row = QHBoxLayout()
         device_row.addWidget(QLabel("Device:"))
-        self.s_device = QComboBox(); self.s_device.addItems(["auto", "cpu", "mps", "0"])
+        self.s_device = QComboBox(); self.s_device.addItems(_available_devices())
         self.s_device.currentTextChanged.connect(lambda _: self._on_model_config_changed())
         device_row.addWidget(self.s_device, 1)
         model_layout.addLayout(device_row)
