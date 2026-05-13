@@ -46,6 +46,7 @@ pub struct ResultEntry {
     pub source_path: PathBuf,
     pub results: AnalysisResults,
     pub visible: bool, // include in export / shown in viewer dropdown
+    pub selection_order: Option<u32>, // monotonic tick rank; None = never ticked
     pub static_note: Option<String>,
 }
 
@@ -111,6 +112,7 @@ pub struct AppState {
     hovered_bubble: Option<usize>,
     suppress_hover_bubble: Option<usize>,
     undo_stack: Vec<UndoAction>,
+    next_selection_rank: u32,
 
     // Export options
     export_csv: bool,
@@ -303,6 +305,7 @@ impl AppState {
             hovered_bubble: None,
             suppress_hover_bubble: None,
             undo_stack: Vec::new(),
+            next_selection_rank: 0,
 
             export_csv: true,
             export_png: false,
@@ -650,6 +653,7 @@ impl AppState {
                     source_path: src_path,
                     results,
                     visible: false,
+                    selection_order: None,
                     static_note,
                 }));
             }
@@ -774,13 +778,19 @@ impl AppState {
     // ------------- Export -------------
 
     fn export_visible_results(&mut self) {
-        let visible_idx: Vec<usize> = self
+        let mut visible_idx: Vec<usize> = self
             .results_list
             .iter()
             .enumerate()
             .filter(|(_, r)| r.visible)
             .map(|(i, _)| i)
             .collect();
+        visible_idx.sort_by_key(|&i| {
+            (
+                self.results_list[i].selection_order.unwrap_or(u32::MAX),
+                i,
+            )
+        });
         if visible_idx.is_empty() {
             self.status = "Nothing visible to export.".into();
             return;
@@ -1443,6 +1453,7 @@ impl AppState {
 
         // Result blocks
         let mut focus_change: Option<usize> = None;
+        let mut newly_selected: Vec<usize> = Vec::new();
         let results_h = (ui.available_height() - 150.0).max(80.0);
         let focused = self.focused_result;
         let dim_border = ui.visuals().widgets.noninteractive.bg_stroke.color;
@@ -1534,8 +1545,16 @@ impl AppState {
                             v.widgets.inactive.bg_stroke = Stroke::new(1.5, accent);
                             v.widgets.hovered.bg_stroke = Stroke::new(1.5, accent_hover);
                             v.widgets.active.bg_stroke = Stroke::new(1.5, accent_active);
-                            ui.checkbox(&mut r.visible, "")
+                            let was = r.visible;
+                            let resp = ui.checkbox(&mut r.visible, "")
                                 .on_hover_text("Include in export");
+                            if resp.changed() {
+                                if !was && r.visible {
+                                    newly_selected.push(i);
+                                } else if was && !r.visible {
+                                    r.selection_order = None;
+                                }
+                            }
                         });
 
                         let block_w = ui.available_width();
@@ -1688,6 +1707,13 @@ impl AppState {
                     ui.add_space(4.0);
                 }
             });
+
+        for i in newly_selected {
+            if let Some(r) = self.results_list.get_mut(i) {
+                r.selection_order = Some(self.next_selection_rank);
+                self.next_selection_rank = self.next_selection_rank.wrapping_add(1);
+            }
+        }
 
         if let Some(i) = focus_change {
             self.focused_result = Some(i);
