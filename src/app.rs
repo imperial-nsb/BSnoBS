@@ -869,7 +869,18 @@ impl AppState {
             visible_idx.len(),
             target.display()
         );
+        open_in_file_manager(&target);
     }
+}
+
+fn open_in_file_manager(path: &Path) {
+    #[cfg(target_os = "macos")]
+    let cmd = std::process::Command::new("open").arg(path).spawn();
+    #[cfg(target_os = "windows")]
+    let cmd = std::process::Command::new("explorer").arg(path).spawn();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let cmd = std::process::Command::new("xdg-open").arg(path).spawn();
+    let _ = cmd;
 }
 
 // -------------------------------------------------------------------
@@ -1948,7 +1959,10 @@ impl AppState {
                     });
                     self.current_frame = idx.clamp(0, max) as usize;
                 } else {
-                    ui.add_enabled(false, Slider::new(&mut 0i64, 0..=0).trailing_fill(true));
+                    ui.add_enabled(
+                        false,
+                        Slider::new(&mut 0i64, 0..=1).show_value(false).trailing_fill(true),
+                    );
                 }
                 if ui.button("▶").clicked() && n_frames > 0 && self.current_frame + 1 < n_frames {
                     self.current_frame += 1;
