@@ -245,7 +245,9 @@ fn paint_histogram(
     let title_scale = PxScale::from(20.0);
     let axis_scale = PxScale::from(14.0);
 
-    draw_text_mut(img, black, plot_left, 10, title_scale, &font, title);
+    let (title_w, _) = text_size(title_scale, &font, title);
+    let title_x = plot_left + (plot_w - title_w as i32) / 2;
+    draw_text_mut(img, black, title_x, 10, title_scale, &font, title);
 
     if x_max <= x_min || y_max <= 0.0 {
         return;
@@ -357,7 +359,42 @@ fn paint_histogram(
         x_label,
     );
     let y_label = mode.axis_label();
-    draw_text_mut(img, black, 6, plot_top - 6, axis_scale, &font, y_label);
+    draw_rotated_y_label(img, y_label, axis_scale, &font, black, plot_top, plot_bot);
+}
+
+fn draw_rotated_y_label(
+    canvas: &mut RgbImage,
+    text: &str,
+    scale: PxScale,
+    font: &FontRef,
+    color: Rgb<u8>,
+    plot_top: i32,
+    plot_bot: i32,
+) {
+    let (tw, th) = text_size(scale, font, text);
+    let pad = 4u32;
+    let tmp_w = tw + 2 * pad;
+    let tmp_h = th + 2 * pad;
+    let mut tmp = RgbImage::from_pixel(tmp_w, tmp_h, Rgb([255u8, 255, 255]));
+    draw_text_mut(&mut tmp, color, pad as i32, pad as i32, scale, font, text);
+    let rotated = imageproc::geometric_transformations::rotate270(&tmp);
+    let rot_w = rotated.width() as i32;
+    let rot_h = rotated.height() as i32;
+    let x0 = 8;
+    let y0 = plot_top + ((plot_bot - plot_top) - rot_h) / 2;
+    for y in 0..rot_h {
+        for x in 0..rot_w {
+            let px = *rotated.get_pixel(x as u32, y as u32);
+            if px == Rgb([255u8, 255, 255]) {
+                continue;
+            }
+            let cx = x0 + x;
+            let cy = y0 + y;
+            if cx >= 0 && cy >= 0 && (cx as u32) < canvas.width() && (cy as u32) < canvas.height() {
+                canvas.put_pixel(cx as u32, cy as u32, px);
+            }
+        }
+    }
 }
 
 fn blank_canvas() -> RgbImage {
