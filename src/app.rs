@@ -109,6 +109,7 @@ pub struct AppState {
     edit_mode: bool,
     hovered_bubble: Option<usize>,
     suppress_hover_bubble: Option<usize>,
+    undo_stack: Vec<UndoAction>,
 
     // Worker
     worker_rx: Option<mpsc::Receiver<WorkerMsg>>,
@@ -118,10 +119,16 @@ pub struct AppState {
     start_time: Instant,
 }
 
+enum UndoAction {
+    ToggleBubble { result_idx: usize, frame_idx: usize, bubble_idx: usize, was_valid: bool, was_static: bool },
+    DiscardFrame  { result_idx: usize, frame_idx: usize, frame: crate::types::FrameResult },
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum HistMode {
     AvgPerImage,
     Counts,
+    Percent,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -229,12 +236,13 @@ impl AppState {
             bw_mode: true,
             show_overlays: true,
             show_bubbles: true,
-            show_rejected: true,
-            show_static: true,
+            show_rejected: false,
+            show_static: false,
             hist_mode: HistMode::AvgPerImage,
             edit_mode: false,
             hovered_bubble: None,
             suppress_hover_bubble: None,
+            undo_stack: Vec::new(),
 
             worker_rx: None,
             in_progress: false,
@@ -1139,9 +1147,11 @@ impl AppState {
             counts[idx] += 1;
         }
 
+        let total = diams.len() as f32;
         let denom = match mode {
             HistMode::Counts => 1.0,
             HistMode::AvgPerImage => n_frames.max(1) as f32,
+            HistMode::Percent => total / 100.0,
         };
 
         // Reserve a strip at the top of the rect for the Y-max label so
@@ -1175,6 +1185,7 @@ impl AppState {
                 else if y_max >= 1.0 { format!("{:.1}", y_max) }
                 else { format!("{:.2}", y_max) }
             }
+            HistMode::Percent => format!("{:.0}%", y_max),
         };
         painter.text(
             Pos2::new(plot_left, rect.top() + 2.0),
@@ -1203,6 +1214,7 @@ impl AppState {
                     self.current_frame = 0;
                     self.zoom = 1.0;
                     self.pan = Vec2::ZERO;
+                    self.undo_stack.clear();
                     self.status = "Results cleared.".into();
                 }
             });
@@ -1238,6 +1250,7 @@ impl AppState {
                 "avg bub/img",
             );
             ui.selectable_value(&mut self.hist_mode, HistMode::Counts, "counts");
+            ui.selectable_value(&mut self.hist_mode, HistMode::Percent, "%");
         });
         ui.add_space(2.0);
 
@@ -1260,7 +1273,9 @@ impl AppState {
 
         // Global Y-axis ceiling across all stacks, in the active mode.
         let hist_mode = self.hist_mode;
-        let global_y_max: f32 = {
+        let global_y_max: f32 = if hist_mode == HistMode::Percent {
+            100.0
+        } else {
             let n_bins = 24;
             let bin_w = (global_max - global_min) / n_bins as f32;
             let mut y_max: f32 = 0.0;
@@ -1278,6 +1293,7 @@ impl AppState {
                         HistMode::AvgPerImage => {
                             max_c / r.results.frames.len().max(1) as f32
                         }
+                        HistMode::Percent => unreachable!(),
                     };
                     if v > y_max { y_max = v; }
                 }
@@ -1354,7 +1370,7 @@ impl AppState {
                                     );
                                 }
 
-                                if is_focused && !sorted.is_empty() {
+                                if !sorted.is_empty() {
                                     let min_d = sorted[0];
                                     let max_d = sorted[sorted.len() - 1];
                                     ui.add(
@@ -1508,6 +1524,67 @@ impl AppState {
                     .map(|r| !r.results.frames.is_empty())
                     .unwrap_or(false);
                 ui.add_enabled(has_results, egui::Checkbox::new(&mut self.edit_mode, "✏ Edit"));
+                let can_undo = !self.undo_stack.is_empty();
+                if ui
+                    .add_enabled(can_undo, egui::Button::new("↩ Undo"))
+                    .on_hover_text("Undo last edit")
+                    .clicked()
+                {
+                    if let Some(action) = self.undo_stack.pop() {
+                        match action {
+                            UndoAction::ToggleBubble { result_idx, frame_idx, bubble_idx, was_valid, was_static } => {
+                                if let Some(res) = self.results_list.get_mut(result_idx) {
+                                    if let Some(frame) = res.results.frames.get_mut(frame_idx) {
+                                        if let Some(bubble) = frame.bubbles.get_mut(bubble_idx) {
+                                            bubble.is_valid  = was_valid;
+                                            bubble.is_static = was_static;
+                                        }
+                                        frame.num_valid    = frame.bubbles.iter().filter(|b| b.is_valid).count();
+                                        frame.num_rejected = frame.bubbles.iter().filter(|b| !b.is_valid).count();
+                                    }
+                                }
+                            }
+                            UndoAction::DiscardFrame { result_idx, frame_idx, frame } => {
+                                if let Some(res) = self.results_list.get_mut(result_idx) {
+                                    let idx = frame_idx.min(res.results.frames.len());
+                                    res.results.frames.insert(idx, frame);
+                                    if self.focused_result == Some(result_idx) {
+                                        self.current_frame = frame_idx;
+                                        self.texture = None;
+                                        self.texture_for = None;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if ui
+                    .add_enabled(has_results, egui::Button::new("🗑 Discard"))
+                    .on_hover_text("Remove this image from the results")
+                    .clicked()
+                {
+                    if let Some(focus_idx) = self.focused_result {
+                        if let Some(res) = self.results_list.get_mut(focus_idx) {
+                            let fi = self.current_frame;
+                            if fi < res.results.frames.len() {
+                                let removed = res.results.frames.remove(fi);
+                                self.undo_stack.push(UndoAction::DiscardFrame {
+                                    result_idx: focus_idx,
+                                    frame_idx: fi,
+                                    frame: removed,
+                                });
+                                let new_len = res.results.frames.len();
+                                if new_len == 0 {
+                                    self.current_frame = 0;
+                                } else {
+                                    self.current_frame = fi.min(new_len - 1);
+                                }
+                                self.texture = None;
+                                self.texture_for = None;
+                            }
+                        }
+                    }
+                }
             });
         });
         ui.separator();
@@ -1662,14 +1739,24 @@ impl AppState {
                         if image_resp.clicked() {
                             if let Some(bi) = self.hovered_bubble {
                                 if let Some(res) = self.results_list.get_mut(focus_idx) {
-                                    let frame = &mut res.results.frames[self.current_frame];
+                                    let fi = self.current_frame;
+                                    let frame = &mut res.results.frames[fi];
                                     if let Some(bubble) = frame.bubbles.get_mut(bi) {
+                                        let prev_valid  = bubble.is_valid;
+                                        let prev_static = bubble.is_static;
                                         if bubble.is_valid {
                                             bubble.is_valid = false;
                                         } else {
                                             bubble.is_valid = true;
                                             bubble.is_static = false;
                                         }
+                                        self.undo_stack.push(UndoAction::ToggleBubble {
+                                            result_idx: focus_idx,
+                                            frame_idx:  fi,
+                                            bubble_idx: bi,
+                                            was_valid:  prev_valid,
+                                            was_static: prev_static,
+                                        });
                                     }
                                     frame.num_valid = frame.bubbles.iter().filter(|b| b.is_valid).count();
                                     frame.num_rejected = frame.bubbles.iter().filter(|b| !b.is_valid).count();
