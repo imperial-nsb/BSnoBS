@@ -26,7 +26,7 @@ src/
   app.rs             ★ The whole UI. Big file (~1.1k LOC) — read this first.
   inference.rs       letterbox → ort Session → decode → class-agnostic NMS
   static_filter.rs   cross-frame persistent-detection rejection
-  exporter.rs        CSV + JSON writers (Python-compatible field names)
+  exporter.rs        CSV + JSON writers, PNG overlay + histogram rasterizers (imageproc + ab_glyph)
   types.rs           BubbleData / FrameResult / AnalysisResults / AnalysisParameters
 ```
 
@@ -53,7 +53,7 @@ src/
 3. **Run** — `start_run` takes the analyzer out of `AppState`, sends it to a worker that iterates every checked workspace folder sequentially. For each folder the worker emits `Progress { folder_idx, folder_total, frame_idx, frame_total, ... }`, then `FolderDone(ResultEntry)`. After the last folder it sends `AllDone(analyzer)` so the main thread can put the analyzer back. Re-running a folder replaces its existing `ResultEntry` (matched by `source_path`).
 4. **Settings invalidation** — at the top of every `update()`, `maybe_invalidate_results` snapshots all results-affecting settings (conf, iou, max_det, scale, μL/frame, min/max diameter, static-filter config, reject_static). If the snapshot differs from last frame's, `results_list` is wiped. After a run completes, the baseline snapshot is refreshed so float-drift doesn't immediately invalidate the just-produced results.
 5. **Viewer** — `ensure_frame_texture` lazily loads + uploads the image for the focused result's current frame. Cache key is `(focus_idx, frame_idx, bw_mode)`. B&W is applied at upload time via Rec. 601 luma. Overlays are drawn on top in `draw_overlays` (green = valid, red = size-rejected, dashed yellow = static dirt).
-6. **Export** — `export_visible_results` writes every `ResultEntry` with `visible == true`. Single visible result: flat layout in a timestamped dir. Multiple: one subdir per sample inside a timestamped parent dir. Each sample gets `*_bubble_data_full.csv`, `*_summary.json`, `*_static_rejects.csv` (if any), and `*_run_metadata.json`.
+6. **Export** — `export_visible_results` writes every `ResultEntry` with `visible == true`. The user picks the destination folder via `save_file` (default name `bsnobs_run_…` or `<sample>_count_…`). One subdir per sample inside the chosen dir. Each sample dir always gets `*_run_metadata.json`; the three checkboxes below the Export button add: `csv` → `*_bubble_data.csv` (accepted bubbles only, no rejects file), `png` → `overlays/<frame>_overlay.png` rasterized via `imageproc` (respects the viewer's accepted/rejected/static toggles), `hist` → `*_histogram.png` per sample plus a `combined_histogram.png` at the root when there are 2+ samples. Histograms use the active `HistMode` and shared global x/y axes.
 
 ## Design decisions (and why)
 

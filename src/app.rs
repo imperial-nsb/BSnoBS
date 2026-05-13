@@ -9,7 +9,9 @@ use eframe::egui::{
 };
 use image::ImageReader;
 
-use crate::exporter;
+use crate::exporter::{
+    self, ExportOpts, HistAxisMode,
+};
 use crate::inference::{Device, StudentAnalyzer, INPUT_SIZE};
 use crate::static_filter::{self, StaticFilterConfig};
 use crate::types::{AnalysisParameters, AnalysisResults, FrameResult};
@@ -110,6 +112,11 @@ pub struct AppState {
     hovered_bubble: Option<usize>,
     suppress_hover_bubble: Option<usize>,
     undo_stack: Vec<UndoAction>,
+
+    // Export options
+    export_csv: bool,
+    export_png: bool,
+    export_hist: bool,
 
     // Worker
     worker_rx: Option<mpsc::Receiver<WorkerMsg>>,
@@ -243,6 +250,10 @@ impl AppState {
             hovered_bubble: None,
             suppress_hover_bubble: None,
             undo_stack: Vec::new(),
+
+            export_csv: true,
+            export_png: false,
+            export_hist: true,
 
             worker_rx: None,
             in_progress: false,
@@ -710,20 +721,28 @@ impl AppState {
     // ------------- Export -------------
 
     fn export_visible_results(&mut self) {
-        let visible: Vec<&ResultEntry> = self.results_list.iter().filter(|r| r.visible).collect();
-        if visible.is_empty() {
+        let visible_idx: Vec<usize> = self
+            .results_list
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.visible)
+            .map(|(i, _)| i)
+            .collect();
+        if visible_idx.is_empty() {
             self.status = "Nothing visible to export.".into();
             return;
         }
         let ts = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
         let conf_tag = format!("conf{:02}", (self.conf * 100.0).round() as u32);
-        let suffix = if self.reject_static { "_static_rs" } else { "_rs" };
-        let default_name = if visible.len() == 1 {
-            format!("{}_count_{}{}_{}", visible[0].name, conf_tag, suffix, ts)
+        let default_name = if visible_idx.len() == 1 {
+            format!(
+                "{}_count_{}_{}",
+                self.results_list[visible_idx[0]].name, conf_tag, ts
+            )
         } else {
-            format!("bsnobs_run_{}{}_{}", conf_tag, suffix, ts)
+            format!("bsnobs_run_{}_{}", conf_tag, ts)
         };
-        let parent_hint = visible[0]
+        let parent_hint = self.results_list[visible_idx[0]]
             .source_path
             .parent()
             .map(|p| p.to_path_buf())
@@ -731,31 +750,125 @@ impl AppState {
 
         let Some(parent) = rfd::FileDialog::new()
             .set_directory(&parent_hint)
-            .set_title(&format!("Choose parent dir; will create {default_name}"))
-            .pick_folder()
+            .set_file_name(&default_name)
+            .set_title("Choose export folder name")
+            .save_file()
         else { return };
-        let target = parent.join(&default_name);
+        let target = parent;
         if let Err(e) = std::fs::create_dir_all(&target) {
             self.status = format!("Could not create {}: {}", target.display(), e);
             return;
         }
 
-        for r in &visible {
-            let sub = if visible.len() == 1 { target.clone() } else { target.join(&r.name) };
+        let opts = ExportOpts {
+            csv: self.export_csv,
+            png: self.export_png,
+            hist: self.export_hist,
+            show_bubbles: self.show_bubbles,
+            show_rejected: self.show_rejected,
+            show_static: self.show_static,
+        };
+        let hist_mode = match self.hist_mode {
+            HistMode::Counts => HistAxisMode::Counts,
+            HistMode::AvgPerImage => HistAxisMode::AvgPerImage,
+            HistMode::Percent => HistAxisMode::Percent,
+        };
+
+        let visible_refs: Vec<&AnalysisResults> = visible_idx
+            .iter()
+            .map(|&i| &self.results_list[i].results)
+            .collect();
+        let (x_min, x_max) = exporter::global_diameter_range(&visible_refs);
+        let y_max = exporter::global_y_max(&visible_refs, x_min, x_max, hist_mode);
+
+        let total_frames: usize = visible_idx
+            .iter()
+            .filter(|_| opts.png)
+            .map(|&i| self.results_list[i].results.frames.len())
+            .sum();
+        let mut done_frames = 0usize;
+
+        for &i in &visible_idx {
+            let r = &self.results_list[i];
+            let sub = target.join(&r.name);
             if let Err(e) = std::fs::create_dir_all(&sub) {
                 self.status = format!("Could not create {}: {}", sub.display(), e);
-                return;
-            }
-            if let Err(e) = exporter::export(&r.results, &sub) {
-                self.status = format!("Export failed for {}: {}", r.name, e);
                 return;
             }
             if let Err(e) = write_metadata(self, &r.results, &r.source_path, &sub) {
                 self.status = format!("Metadata write failed for {}: {}", r.name, e);
                 return;
             }
+            if opts.csv {
+                if let Err(e) = exporter::export_csv_accepted(&r.results, &sub) {
+                    self.status = format!("CSV export failed for {}: {}", r.name, e);
+                    return;
+                }
+            }
+            if opts.hist {
+                let hist_path = sub.join(format!("{}_histogram.png", r.name));
+                if let Err(e) = exporter::render_sample_histogram(
+                    &r.results, hist_mode, x_min, x_max, y_max, &hist_path,
+                ) {
+                    self.status = format!("Histogram export failed for {}: {}", r.name, e);
+                    return;
+                }
+            }
+            if opts.png {
+                let overlays_dir = sub.join("overlays");
+                if let Err(e) = std::fs::create_dir_all(&overlays_dir) {
+                    self.status = format!("Could not create {}: {}", overlays_dir.display(), e);
+                    return;
+                }
+                for frame in &r.results.frames {
+                    let stem = frame
+                        .image_path
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("frame");
+                    let out = overlays_dir.join(format!("{stem}_overlay.png"));
+                    if let Err(e) = exporter::render_overlay_png(
+                        frame,
+                        r.results.parameters.scale_um_per_pixel,
+                        opts,
+                        &out,
+                    ) {
+                        self.status = format!("PNG overlay failed for {}: {}", r.name, e);
+                        return;
+                    }
+                    done_frames += 1;
+                    if total_frames > 0 && done_frames % 10 == 0 {
+                        self.status =
+                            format!("Exporting overlays… {done_frames}/{total_frames}");
+                    }
+                }
+            }
         }
-        self.status = format!("Exported {} sample(s) to {}", visible.len(), target.display());
+
+        if opts.hist && visible_idx.len() > 1 {
+            let combined: Vec<(&str, &AnalysisResults)> = visible_idx
+                .iter()
+                .map(|&i| {
+                    (
+                        self.results_list[i].name.as_str(),
+                        &self.results_list[i].results,
+                    )
+                })
+                .collect();
+            let combined_path = target.join("combined_histogram.png");
+            if let Err(e) = exporter::render_combined_histogram(
+                &combined, hist_mode, x_min, x_max, y_max, &combined_path,
+            ) {
+                self.status = format!("Combined histogram failed: {}", e);
+                return;
+            }
+        }
+
+        self.status = format!(
+            "Exported {} sample(s) to {}",
+            visible_idx.len(),
+            target.display()
+        );
     }
 }
 
@@ -1235,7 +1348,7 @@ impl AppState {
 
         // Result blocks
         let mut focus_change: Option<usize> = None;
-        let results_h = (ui.available_height() - 54.0).max(80.0);
+        let results_h = (ui.available_height() - 110.0).max(80.0);
         let focused = self.focused_result;
         let dim_border = ui.visuals().widgets.noninteractive.bg_stroke.color;
         let blue_border = Color32::from_rgb(70, 140, 220);
@@ -1482,16 +1595,29 @@ impl AppState {
         }
 
         ui.add_space(8.0);
-        let can_export = self.results_list.iter().any(|r| r.visible) && !self.in_progress;
+        let can_export = self.results_list.iter().any(|r| r.visible)
+            && !self.in_progress
+            && (self.export_csv || self.export_png || self.export_hist);
         ui.vertical_centered(|ui| {
-            let btn_w = (ui.available_width() * 0.7).clamp(140.0, 220.0);
-            let btn = egui::Button::new(egui::RichText::new("Export…").strong().size(15.0))
-                .min_size(Vec2::new(btn_w, 32.0));
+            let btn_w = (ui.available_width() * 0.7).clamp(140.0, 240.0);
+            let btn = egui::Button::new(
+                egui::RichText::new("Export…").strong().size(16.0),
+            )
+            .min_size(Vec2::new(btn_w, 38.0));
             if ui.add_enabled(can_export, btn).clicked() {
                 self.export_visible_results();
             }
+            ui.add_space(6.0);
         });
-        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            let approx_row_w = 170.0;
+            let pad = ((ui.available_width() - approx_row_w) / 2.0).max(0.0);
+            ui.add_space(pad);
+            ui.checkbox(&mut self.export_csv, "csv");
+            ui.checkbox(&mut self.export_png, "png");
+            ui.checkbox(&mut self.export_hist, "hist");
+        });
+        ui.add_space(16.0);
     }
 
 
