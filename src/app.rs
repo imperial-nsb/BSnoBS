@@ -105,6 +105,7 @@ pub struct AppState {
     show_bubbles: bool,
     show_rejected: bool,
     show_static: bool,
+    hist_mode: HistMode,
     edit_mode: bool,
     hovered_bubble: Option<usize>,
     suppress_hover_bubble: Option<usize>,
@@ -115,6 +116,12 @@ pub struct AppState {
     progress: RunProgress,
     status: String,
     start_time: Instant,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HistMode {
+    AvgPerImage,
+    Counts,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -224,6 +231,7 @@ impl AppState {
             show_bubbles: true,
             show_rejected: true,
             show_static: true,
+            hist_mode: HistMode::AvgPerImage,
             edit_mode: false,
             hovered_bubble: None,
             suppress_hover_bubble: None,
@@ -1097,22 +1105,28 @@ impl AppState {
     }
 
     /// Draw a compact bar histogram of bubble diameters into `rect`.
-    /// `axis_min`/`axis_max` define the X-axis range so multiple
-    /// histograms can be visually compared.
+    /// `axis_min`/`axis_max` define the X-axis range and `y_max` the
+    /// shared Y-axis ceiling, so multiple histograms can be visually
+    /// compared. Bars are scaled in the chosen `mode` (raw counts or
+    /// average bubbles per image).
     fn draw_mini_histogram(
         ui: &egui::Ui,
         rect: Rect,
         diams: &[f32],
         axis_min: f32,
         axis_max: f32,
+        n_frames: usize,
+        mode: HistMode,
+        y_max: f32,
     ) {
         let painter = ui.painter();
         let bg = ui.visuals().extreme_bg_color;
         let bar_col = ui.visuals().widgets.inactive.fg_stroke.color;
+        let label_col = ui.visuals().weak_text_color();
 
         painter.rect_filled(rect, 2.0, bg);
 
-        if diams.is_empty() || axis_max <= axis_min {
+        if axis_max <= axis_min || y_max <= 0.0 {
             return;
         }
 
@@ -1124,9 +1138,15 @@ impl AppState {
             let idx = (((d - axis_min) / bin_w) as usize).min(n_bins - 1);
             counts[idx] += 1;
         }
-        let max_count = *counts.iter().max().unwrap_or(&1) as f32;
 
-        let plot_top = rect.top() + 4.0;
+        let denom = match mode {
+            HistMode::Counts => 1.0,
+            HistMode::AvgPerImage => n_frames.max(1) as f32,
+        };
+
+        // Reserve a strip at the top of the rect for the Y-max label so
+        // tall bars in the leftmost bins don't overlap it.
+        let plot_top = rect.top() + 13.0;
         let plot_bot = rect.bottom() - 4.0;
         let plot_h = plot_bot - plot_top;
         let plot_left = rect.left() + 4.0;
@@ -1136,7 +1156,8 @@ impl AppState {
 
         for (i, &c) in counts.iter().enumerate() {
             if c == 0 { continue; }
-            let h = (c as f32 / max_count) * plot_h;
+            let v = c as f32 / denom;
+            let h = (v / y_max).min(1.0) * plot_h;
             let x0 = plot_left + i as f32 * bar_px + 0.5;
             let x1 = x0 + (bar_px - 1.0).max(1.0);
             let y0 = plot_bot - h;
@@ -1146,6 +1167,22 @@ impl AppState {
                 bar_col,
             );
         }
+
+        let y_label = match mode {
+            HistMode::Counts => format!("{:.0}", y_max),
+            HistMode::AvgPerImage => {
+                if y_max >= 10.0 { format!("{:.0}", y_max) }
+                else if y_max >= 1.0 { format!("{:.1}", y_max) }
+                else { format!("{:.2}", y_max) }
+            }
+        };
+        painter.text(
+            Pos2::new(plot_left, rect.top() + 2.0),
+            egui::Align2::LEFT_TOP,
+            y_label,
+            egui::FontId::monospace(9.0),
+            label_col,
+        );
     }
 
     fn results_panel(&mut self, ui: &mut egui::Ui) {
@@ -1191,6 +1228,19 @@ impl AppState {
         let dim_border = ui.visuals().widgets.noninteractive.bg_stroke.color;
         let blue_border = Color32::from_rgb(70, 140, 220);
 
+        // Histogram Y-axis mode toggle (kept above the result cards so it
+        // sits next to the stacks it controls).
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Histogram:").small());
+            ui.selectable_value(
+                &mut self.hist_mode,
+                HistMode::AvgPerImage,
+                "avg bub/img",
+            );
+            ui.selectable_value(&mut self.hist_mode, HistMode::Counts, "counts");
+        });
+        ui.add_space(2.0);
+
         // Global diameter range, used to keep histogram axes consistent across cards.
         let (global_min, global_max) = {
             let mut mn = f32::INFINITY;
@@ -1206,6 +1256,33 @@ impl AppState {
             } else {
                 (0.0, 1.0)
             }
+        };
+
+        // Global Y-axis ceiling across all stacks, in the active mode.
+        let hist_mode = self.hist_mode;
+        let global_y_max: f32 = {
+            let n_bins = 24;
+            let bin_w = (global_max - global_min) / n_bins as f32;
+            let mut y_max: f32 = 0.0;
+            if bin_w > 0.0 {
+                for r in &self.results_list {
+                    let mut counts = vec![0u32; n_bins];
+                    for d in r.results.diameters_valid() {
+                        if d < global_min || d > global_max { continue; }
+                        let idx = (((d - global_min) / bin_w) as usize).min(n_bins - 1);
+                        counts[idx] += 1;
+                    }
+                    let max_c = *counts.iter().max().unwrap_or(&0) as f32;
+                    let v = match hist_mode {
+                        HistMode::Counts => max_c,
+                        HistMode::AvgPerImage => {
+                            max_c / r.results.frames.len().max(1) as f32
+                        }
+                    };
+                    if v > y_max { y_max = v; }
+                }
+            }
+            if y_max > 0.0 { y_max } else { 1.0 }
         };
 
         egui::ScrollArea::vertical()
@@ -1302,7 +1379,14 @@ impl AppState {
                                         Sense::hover(),
                                     );
                                     Self::draw_mini_histogram(
-                                        ui, rect, &sorted, global_min, global_max,
+                                        ui,
+                                        rect,
+                                        &sorted,
+                                        global_min,
+                                        global_max,
+                                        r.results.frames.len(),
+                                        hist_mode,
+                                        global_y_max,
                                     );
                                     ui.horizontal(|ui| {
                                         ui.add(
@@ -1682,6 +1766,9 @@ impl AppState {
             if has_results {
                 self.edit_mode = !self.edit_mode;
             }
+        }
+        if self.edit_mode && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.edit_mode = false;
         }
 
         // Inference progress overlay
