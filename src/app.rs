@@ -80,7 +80,6 @@ pub struct AppState {
     resolved_device: Option<Device>,
 
     // Settings
-    open_settings: Option<SettingsSection>,
     params: AnalysisParameters,
     conf: f32,
     imgsz: u32,
@@ -187,6 +186,60 @@ fn bundled_weights() -> PathBuf {
 
 fn fbits(x: f32) -> u32 { x.to_bits() }
 
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+struct SavedDefaults {
+    device: Device,
+    conf: f32,
+    iou: f32,
+    max_det: usize,
+    reject_static: bool,
+    params: AnalysisParameters,
+    static_cfg: StaticFilterConfig,
+}
+
+impl Default for SavedDefaults {
+    fn default() -> Self {
+        Self {
+            device: Device::Auto,
+            conf: 0.55,
+            iou: 0.45,
+            max_det: 1000,
+            reject_static: true,
+            params: AnalysisParameters::default(),
+            static_cfg: StaticFilterConfig::default(),
+        }
+    }
+}
+
+fn defaults_path() -> Option<PathBuf> {
+    let base = if cfg!(target_os = "macos") {
+        std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Library/Application Support/bsnobs"))
+    } else if cfg!(target_os = "windows") {
+        std::env::var_os("APPDATA").map(|p| PathBuf::from(p).join("bsnobs"))
+    } else {
+        std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+            .map(|p| p.join("bsnobs"))
+    };
+    base.map(|p| p.join("defaults.json"))
+}
+
+fn load_saved_defaults() -> Option<SavedDefaults> {
+    let path = defaults_path()?;
+    let txt = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&txt).ok()
+}
+
+fn save_defaults(d: &SavedDefaults) -> Result<()> {
+    let path = defaults_path().ok_or_else(|| anyhow::anyhow!("no config dir"))?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, serde_json::to_string_pretty(d)?)?;
+    Ok(())
+}
+
 // -------------------------------------------------------------------
 // AppState impl
 // -------------------------------------------------------------------
@@ -207,10 +260,11 @@ impl AppState {
         egui_extras::install_image_loaders(&cc.egui_ctx);
 
         let weights = bundled_weights();
+        let defaults = load_saved_defaults().unwrap_or_default();
         let mut s = Self {
             weights_path: weights,
             using_bundled: true,
-            device: Device::Auto,
+            device: defaults.device,
 
             analyzer: None,
             model_status: "Not loaded.".into(),
@@ -220,14 +274,13 @@ impl AppState {
             model_load_rx: None,
             resolved_device: None,
 
-            open_settings: None,
-            params: AnalysisParameters::default(),
-            conf: 0.55,
+            params: defaults.params,
+            conf: defaults.conf,
             imgsz: INPUT_SIZE,
-            iou: 0.45,
-            max_det: 1000,
-            reject_static: true,
-            static_cfg: StaticFilterConfig::default(),
+            iou: defaults.iou,
+            max_det: defaults.max_det,
+            reject_static: defaults.reject_static,
+            static_cfg: defaults.static_cfg,
             last_settings: None,
 
             workspace: Vec::new(),
@@ -1142,30 +1195,52 @@ impl AppState {
     /// pushing the Run button down.
     fn controls_bar(&mut self, ui: &mut egui::Ui) {
         let sections = [
-            (SettingsSection::Model, "Model"),
-            (SettingsSection::Detection, "Detection"),
-            (SettingsSection::Physics, "Physics"),
-            (SettingsSection::Static, "Static dirt rejection"),
+            (SettingsSection::Model, "Model", false),
+            (SettingsSection::Detection, "Detection", true),
+            (SettingsSection::Physics, "Physics", true),
+            (SettingsSection::Static, "Static dirt rejection", false),
         ];
-        for (section, label) in sections {
-            let is_open = self.open_settings == Some(section);
-            let resp = egui::CollapsingHeader::new(label)
+        for (section, label, default_open) in sections {
+            egui::CollapsingHeader::new(label)
                 .id_salt(("section", section))
-                .open(Some(is_open))
-                .show(ui, |ui| {
-                    match section {
-                        SettingsSection::Model => self.model_section(ui),
-                        SettingsSection::Detection => self.detection_section(ui),
-                        SettingsSection::Physics => self.physics_section(ui),
-                        SettingsSection::Static => self.static_section(ui),
-                    }
-                })
-                .header_response;
-            if resp.clicked() {
-                self.open_settings = if is_open { None } else { Some(section) };
-            }
+                .default_open(default_open)
+                .show(ui, |ui| match section {
+                    SettingsSection::Model => self.model_section(ui),
+                    SettingsSection::Detection => self.detection_section(ui),
+                    SettingsSection::Physics => self.physics_section(ui),
+                    SettingsSection::Static => self.static_section(ui),
+                });
         }
-        ui.add_space(8.0);
+        ui.add_space(6.0);
+        ui.vertical_centered(|ui| {
+            if ui
+                .button("💾 Save as default")
+                .on_hover_text("Persist current settings as the app's startup defaults")
+                .clicked()
+            {
+                let d = SavedDefaults {
+                    device: self.device,
+                    conf: self.conf,
+                    iou: self.iou,
+                    max_det: self.max_det,
+                    reject_static: self.reject_static,
+                    params: self.params.clone(),
+                    static_cfg: self.static_cfg,
+                };
+                match save_defaults(&d) {
+                    Ok(_) => {
+                        self.status = match defaults_path() {
+                            Some(p) => format!("Saved defaults to {}", p.display()),
+                            None => "Saved defaults.".into(),
+                        };
+                    }
+                    Err(e) => {
+                        self.status = format!("Could not save defaults: {}", e);
+                    }
+                }
+            }
+        });
+        ui.add_space(6.0);
         self.run_button(ui);
         ui.add_space(4.0);
     }

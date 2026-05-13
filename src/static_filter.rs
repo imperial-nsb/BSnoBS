@@ -2,7 +2,7 @@
 
 use crate::types::AnalysisResults;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub struct StaticFilterConfig {
     pub min_frame_frac: f32,
     pub tol_px: f32,

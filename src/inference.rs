@@ -20,7 +20,7 @@ pub const INPUT_SIZE: u32 = 640;
 /// Bundled student weights, embedded in the binary at compile time.
 pub const BUNDLED_WEIGHTS: &[u8] = include_bytes!("../assets/student.onnx");
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Device {
     Auto,
     Cpu,
