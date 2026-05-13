@@ -53,6 +53,104 @@ struct BubbleRow<'a> {
     centroid_y_px: f32,
 }
 
+pub fn export_summary_json(results: &AnalysisResults, out_dir: &Path) -> Result<()> {
+    let params = &results.parameters;
+    let diams: Vec<f32> = results
+        .frames
+        .iter()
+        .flat_map(|f| f.bubbles.iter())
+        .filter(|b| b.is_valid)
+        .map(|b| b.diameter_um)
+        .collect();
+    let vols: Vec<f32> = results
+        .frames
+        .iter()
+        .flat_map(|f| f.bubbles.iter())
+        .filter(|b| b.is_valid)
+        .map(|b| b.volume_um3)
+        .collect();
+    let n_static = results
+        .frames
+        .iter()
+        .flat_map(|f| f.bubbles.iter())
+        .filter(|b| b.is_static)
+        .count();
+
+    let n_frames = results.frames.len();
+    let total_vol_ul = params.sample_volume_per_frame_ul * n_frames as f32;
+
+    let stats = if diams.is_empty() {
+        serde_json::json!({
+            "sample": results.sample_name,
+            "number_of_frames": n_frames,
+            "total_bubbles": 0,
+            "total_rejected": results.total_rejected(),
+            "n_static_rejected": n_static,
+            "total_sample_volume_uL": total_vol_ul,
+        })
+    } else {
+        let total_vol_um3: f32 = vols.iter().sum();
+        let n: f32 = diams.len() as f32;
+        let n_mean: f32 = diams.iter().sum::<f32>() / n;
+        let n_var: f32 = diams.iter().map(|d| (d - n_mean).powi(2)).sum::<f32>() / n;
+        let n_std = n_var.sqrt();
+        let mut sorted = diams.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let n_median = sorted[sorted.len() / 2];
+        let n_min = sorted[0];
+        let n_max = *sorted.last().unwrap();
+
+        let v_mean = if total_vol_um3 > 0.0 {
+            diams.iter().zip(vols.iter()).map(|(d, v)| d * v).sum::<f32>() / total_vol_um3
+        } else {
+            0.0
+        };
+        let v_std = if total_vol_um3 > 0.0 {
+            (diams
+                .iter()
+                .zip(vols.iter())
+                .map(|(d, v)| v * (d - v_mean).powi(2))
+                .sum::<f32>()
+                / total_vol_um3)
+                .sqrt()
+        } else {
+            0.0
+        };
+        let pdi = if n_mean > 0.0 { (n_std / n_mean).powi(2) } else { 0.0 };
+        let concentration = if total_vol_ul > 0.0 { n / total_vol_ul } else { 0.0 };
+        let mean_bubble_vol_um3 = (4.0 / 3.0) * std::f32::consts::PI * (n_mean / 2.0).powi(3);
+        // gas dose in μL: mean_vol (μm³) × concentration (#/μL) × injection (μL) × 1e-9 (μm³→μL)
+        let gas_dose_ul = mean_bubble_vol_um3 * concentration * params.injection_volume_ul * 1e-9;
+
+        serde_json::json!({
+            "sample": results.sample_name,
+            "number_of_frames": n_frames,
+            "total_bubbles": diams.len(),
+            "total_rejected": results.total_rejected(),
+            "n_static_rejected": n_static,
+            "number_weighted_mean_um": n_mean,
+            "number_weighted_std_um": n_std,
+            "number_weighted_median_um": n_median,
+            "min_diameter_um": n_min,
+            "max_diameter_um": n_max,
+            "volume_weighted_mean_um": v_mean,
+            "volume_weighted_std_um": v_std,
+            "polydispersity_index": pdi,
+            "number_concentration_per_uL": concentration,
+            "total_gas_volume_um3": total_vol_um3,
+            "gas_volume_dose_uL": gas_dose_ul,
+            "total_sample_volume_uL": total_vol_ul,
+            "injection_volume_uL": params.injection_volume_ul,
+        })
+    };
+
+    std::fs::write(
+        out_dir.join(format!("{}_summary.json", results.sample_name)),
+        serde_json::to_string_pretty(&stats)?,
+    )?;
+    Ok(())
+}
+
 pub fn export_csv_accepted(results: &AnalysisResults, out_dir: &Path) -> Result<()> {
     let sample = &results.sample_name;
     let mut wtr = csv::Writer::from_path(out_dir.join(format!("{sample}_bubble_data.csv")))?;

@@ -30,6 +30,12 @@ pub struct AnalysisParameters {
     pub min_diameter_um: f32,
     pub max_diameter_um: f32,
     pub bin_size_um: f32,
+    #[serde(rename = "injection_volume_uL", default = "default_injection_volume")]
+    pub injection_volume_ul: f32,
+}
+
+fn default_injection_volume() -> f32 {
+    100.0
 }
 
 impl Default for AnalysisParameters {
@@ -40,6 +46,7 @@ impl Default for AnalysisParameters {
             min_diameter_um: 0.5,
             max_diameter_um: 20.0,
             bin_size_um: 0.165,
+            injection_volume_ul: 100.0,
         }
     }
 }

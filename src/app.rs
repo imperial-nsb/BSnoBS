@@ -852,6 +852,10 @@ impl AppState {
                 self.status = format!("Metadata write failed for {}: {}", r.name, e);
                 return;
             }
+            if let Err(e) = exporter::export_summary_json(&r.results, &sub) {
+                self.status = format!("Summary write failed for {}: {}", r.name, e);
+                return;
+            }
             if opts.csv {
                 if let Err(e) = exporter::export_csv_accepted(&r.results, &sub) {
                     self.status = format!("CSV export failed for {}: {}", r.name, e);
@@ -1143,6 +1147,11 @@ impl AppState {
         ui.horizontal(|ui| {
             ui.label("Max diam (μm)");
             ui.add(egui::DragValue::new(&mut self.params.max_diameter_um).speed(0.5));
+        });
+        ui.horizontal(|ui| {
+            ui.label("Injection vol (μL)")
+                .on_hover_text("Total injected sample volume — used for gas-dose calc in summary.json");
+            ui.add(egui::DragValue::new(&mut self.params.injection_volume_ul).speed(1.0).max_decimals(2));
         });
     }
 
