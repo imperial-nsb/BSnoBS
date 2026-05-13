@@ -1434,7 +1434,7 @@ impl AppState {
 
         // Result blocks
         let mut focus_change: Option<usize> = None;
-        let results_h = (ui.available_height() - 110.0).max(80.0);
+        let results_h = (ui.available_height() - 150.0).max(80.0);
         let focused = self.focused_result;
         let dim_border = ui.visuals().widgets.noninteractive.bg_stroke.color;
         let blue_border = Color32::from_rgb(70, 140, 220);
@@ -1517,8 +1517,17 @@ impl AppState {
                     };
 
                     ui.horizontal(|ui| {
-                        ui.checkbox(&mut r.visible, "")
-                            .on_hover_text("Include in export");
+                        let accent = Color32::from_rgb(0xE3, 0xCB, 0x83);
+                        let accent_hover = Color32::from_rgb(0xEC, 0xD8, 0x9F);
+                        let accent_active = Color32::from_rgb(0xC9, 0xB0, 0x66);
+                        ui.scope(|ui| {
+                            let v = &mut ui.style_mut().visuals;
+                            v.widgets.inactive.bg_stroke = Stroke::new(1.5, accent);
+                            v.widgets.hovered.bg_stroke = Stroke::new(1.5, accent_hover);
+                            v.widgets.active.bg_stroke = Stroke::new(1.5, accent_active);
+                            ui.checkbox(&mut r.visible, "")
+                                .on_hover_text("Include in export");
+                        });
 
                         let block_w = ui.available_width();
                         let pad = 8.0_f32;
@@ -1681,27 +1690,53 @@ impl AppState {
         }
 
         ui.add_space(8.0);
-        let can_export = self.results_list.iter().any(|r| r.visible)
+        let any_visible = self.results_list.iter().any(|r| r.visible);
+        let can_export = any_visible
             && !self.in_progress
             && (self.export_csv || self.export_png || self.export_hist);
+        let accent = Color32::from_rgb(0xE3, 0xCB, 0x83);
+        let accent_hover = Color32::from_rgb(0xEC, 0xD8, 0x9F);
+        let accent_active = Color32::from_rgb(0xC9, 0xB0, 0x66);
+
+        ui.vertical_centered(|ui| {
+            let txt = if any_visible { " " } else { "Select stacks above for export…" };
+            ui.label(egui::RichText::new(txt).italics().weak().small());
+        });
+        ui.add_space(4.0);
+
         ui.vertical_centered(|ui| {
             let btn_w = (ui.available_width() * 0.7).clamp(140.0, 240.0);
-            let btn = egui::Button::new(
-                egui::RichText::new("Export…").strong().size(16.0),
-            )
-            .min_size(Vec2::new(btn_w, 38.0));
-            if ui.add_enabled(can_export, btn).clicked() {
-                self.export_visible_results();
-            }
+            ui.scope(|ui| {
+                let visuals = &mut ui.style_mut().visuals;
+                visuals.widgets.inactive.weak_bg_fill = accent;
+                visuals.widgets.hovered.weak_bg_fill = accent_hover;
+                visuals.widgets.active.weak_bg_fill = accent_active;
+                let btn = egui::Button::new(
+                    egui::RichText::new("Export…")
+                        .strong()
+                        .color(Color32::from_rgb(40, 30, 10))
+                        .size(16.0),
+                )
+                .min_size(Vec2::new(btn_w, 38.0));
+                if ui.add_enabled(can_export, btn).clicked() {
+                    self.export_visible_results();
+                }
+            });
             ui.add_space(6.0);
         });
         ui.horizontal(|ui| {
             let approx_row_w = 170.0;
             let pad = ((ui.available_width() - approx_row_w) / 2.0).max(0.0);
             ui.add_space(pad);
-            ui.checkbox(&mut self.export_csv, "csv");
-            ui.checkbox(&mut self.export_png, "png");
-            ui.checkbox(&mut self.export_hist, "hist");
+            ui.scope(|ui| {
+                let visuals = &mut ui.style_mut().visuals;
+                visuals.widgets.inactive.bg_stroke = Stroke::new(1.5, accent);
+                visuals.widgets.hovered.bg_stroke = Stroke::new(1.5, accent_hover);
+                visuals.widgets.active.bg_stroke = Stroke::new(1.5, accent_active);
+                ui.checkbox(&mut self.export_csv, "csv");
+                ui.checkbox(&mut self.export_png, "png");
+                ui.checkbox(&mut self.export_hist, "hist");
+            });
         });
         ui.add_space(16.0);
     }
