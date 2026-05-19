@@ -8,6 +8,7 @@ mod exporter;
 mod inference;
 mod static_filter;
 mod types;
+mod updater;
 
 fn main() -> Result<()> {
     env_logger::init();

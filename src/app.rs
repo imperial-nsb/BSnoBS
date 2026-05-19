@@ -15,6 +15,7 @@ use crate::exporter::{
 use crate::inference::{Device, StudentAnalyzer, INPUT_SIZE};
 use crate::static_filter::{self, StaticFilterConfig};
 use crate::types::{AnalysisParameters, AnalysisResults, FrameResult};
+use crate::updater::{UpdateMessage, UpdateUi};
 
 // -------------------------------------------------------------------
 // Data
@@ -125,6 +126,12 @@ pub struct AppState {
     progress: RunProgress,
     status: String,
     start_time: Instant,
+
+    // Updater
+    updater: UpdateUi,
+    updater_auto_checked: bool,
+    show_update_modal: bool,
+    show_restart_modal: bool,
 }
 
 enum UndoAction {
@@ -316,6 +323,11 @@ impl AppState {
             progress: RunProgress::default(),
             status: "Add folders to your workspace to begin.".into(),
             start_time: Instant::now(),
+
+            updater: UpdateUi::default(),
+            updater_auto_checked: false,
+            show_update_modal: false,
+            show_restart_modal: false,
         };
         s.last_settings = Some(s.snapshot_settings());
 
@@ -1013,6 +1025,11 @@ impl eframe::App for AppState {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.drain_worker(ctx);
         self.drain_model_load(ctx);
+        self.drain_updater(ctx);
+        if !self.updater_auto_checked {
+            self.updater_auto_checked = true;
+            self.updater.check();
+        }
         if self.model_loading {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
@@ -1075,8 +1092,13 @@ impl eframe::App for AppState {
         egui::TopBottomPanel::bottom("statusbar").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.label(&self.status);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    self.update_status_widget(ui);
+                });
             });
         });
+
+        self.update_modals(ctx);
 
         egui::CentralPanel::default().show(ctx, |ui| {
             self.center_panel(ui, ctx);
@@ -2279,6 +2301,116 @@ fn draw_overlays(
                 egui::FontId::monospace(9.0),
                 color,
             );
+        }
+    }
+}
+
+// -------------------------------------------------------------------
+// Updater UI
+// -------------------------------------------------------------------
+
+impl AppState {
+    fn drain_updater(&mut self, ctx: &egui::Context) {
+        if self.updater.busy {
+            ctx.request_repaint_after(std::time::Duration::from_millis(250));
+        }
+        if self.updater.poll() {
+            match self.updater.last.clone() {
+                Some(UpdateMessage::Available { .. }) => {
+                    self.show_update_modal = true;
+                }
+                Some(UpdateMessage::Installed { .. }) => {
+                    self.show_restart_modal = true;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn update_status_widget(&mut self, ui: &mut egui::Ui) {
+        let version = UpdateUi::current_version();
+        if self.updater.busy {
+            ui.spinner();
+            ui.label("Checking for updates…");
+            return;
+        }
+        if self.updater.available.is_some() {
+            if ui.button("Update available — install").clicked() {
+                self.show_update_modal = true;
+            }
+            ui.separator();
+        }
+        if ui.small_button("Check for updates").clicked() {
+            self.updater.check();
+        }
+        ui.label(format!("v{version}"));
+        if let Some(UpdateMessage::Error(e)) = &self.updater.last {
+            ui.separator();
+            ui.colored_label(egui::Color32::from_rgb(220, 120, 120), format!("update error: {e}"));
+        } else if matches!(self.updater.last, Some(UpdateMessage::UpToDate)) {
+            ui.separator();
+            ui.label("Up to date.");
+        }
+    }
+
+    fn update_modals(&mut self, ctx: &egui::Context) {
+        if self.show_update_modal {
+            let mut open = true;
+            let mut start_install = false;
+            egui::Window::new("Update available")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .open(&mut open)
+                .show(ctx, |ui| {
+                    ui.label(format!(
+                        "A newer version of BSnoBS is available.\nYou are running v{}.",
+                        UpdateUi::current_version()
+                    ));
+                    ui.add_space(8.0);
+                    ui.label("Click Install to download and replace the running binary. You will need to restart the app afterwards.");
+                    ui.add_space(12.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Install").clicked() {
+                            start_install = true;
+                        }
+                        if ui.button("Later").clicked() {
+                            self.show_update_modal = false;
+                        }
+                    });
+                });
+            if !open {
+                self.show_update_modal = false;
+            }
+            if start_install {
+                self.show_update_modal = false;
+                self.updater.install();
+            }
+        }
+
+        if self.show_restart_modal {
+            let new_version = match &self.updater.last {
+                Some(UpdateMessage::Installed { new_version }) => new_version.clone(),
+                _ => "the new version".to_string(),
+            };
+            let mut open = true;
+            egui::Window::new("Update installed")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .open(&mut open)
+                .show(ctx, |ui| {
+                    ui.label(format!("BSnoBS v{new_version} has been installed."));
+                    ui.add_space(8.0);
+                    ui.label("Quit and relaunch BSnoBS to start using the new version.");
+                    ui.add_space(12.0);
+                    if ui.button("Quit now").clicked() {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                });
+            if !open {
+                self.show_restart_modal = false;
+            }
         }
     }
 }
