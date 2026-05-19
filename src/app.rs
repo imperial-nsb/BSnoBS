@@ -883,6 +883,10 @@ impl AppState {
                     self.status = format!("CSV export failed for {}: {}", r.name, e);
                     return;
                 }
+                if let Err(e) = exporter::export_histogram_csv(&r.results, &sub) {
+                    self.status = format!("Histogram CSV failed for {}: {}", r.name, e);
+                    return;
+                }
             }
             if opts.hist {
                 let hist_path = sub.join(format!("{}_histogram.png", r.name));
@@ -922,6 +926,16 @@ impl AppState {
                     }
                 }
             }
+        }
+
+        let summaries: Vec<exporter::SampleSummary> = visible_idx
+            .iter()
+            .map(|&i| exporter::compute_sample_summary(&self.results_list[i].results))
+            .collect();
+        let combined_summary_path = target.join("combined_summary.csv");
+        if let Err(e) = exporter::export_combined_summary_csv(&summaries, &combined_summary_path) {
+            self.status = format!("Combined summary CSV failed: {}", e);
+            return;
         }
 
         if opts.hist && visible_idx.len() > 1 {
