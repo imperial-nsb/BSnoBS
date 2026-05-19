@@ -3,6 +3,8 @@ name = "bsnobs"
 version = "0.2.0"
 edition = "2021"
 description = "BSnoBS — BubSize no BS. Microbubble sizing from optical microscopy (YOLO + ONNX Runtime)."
+repository = "https://github.com/imperial-nsb/BSnoBS"
+license = "MIT"
 
 [[bin]]
 name = "bsnobs"
@@ -25,6 +27,7 @@ log = "0.4"
 env_logger = "0.11"
 imageproc = { version = "0.26", default-features = false, features = ["text"] }
 ab_glyph = "0.2"
+axoupdater = { version = "0.10", default-features = false, features = ["blocking", "github_releases"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 ort = { version = "=2.0.0-rc.10", default-features = false, features = ["std", "download-binaries", "ndarray", "coreml"] }
@@ -41,3 +44,8 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 opt-level = 3
 lto = "thin"
 codegen-units = 1
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
