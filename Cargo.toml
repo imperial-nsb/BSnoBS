@@ -1,6 +1,6 @@
 [package]
 name = "bsnobs"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 description = "BSnoBS — BubSize no BS. Microbubble sizing from optical microscopy (YOLO + ONNX Runtime)."
 repository = "https://github.com/imperial-nsb/BSnoBS"

@@ -1507,6 +1507,49 @@ impl AppState {
             ui.selectable_value(&mut self.hist_mode, HistMode::Counts, "counts");
             ui.selectable_value(&mut self.hist_mode, HistMode::Percent, "%");
         });
+
+        // Select-all toggle: ticks/unticks every result's visibility checkbox.
+        {
+            let n_total = self.results_list.len();
+            let n_visible = self.results_list.iter().filter(|r| r.visible).count();
+            let mut all_checked = n_total > 0 && n_visible == n_total;
+            let indeterminate = n_visible > 0 && n_visible < n_total;
+            let label = if n_total == 0 {
+                "Select all".to_string()
+            } else {
+                format!("Select all ({}/{})", n_visible, n_total)
+            };
+            let accent = Color32::from_rgb(0xE3, 0xCB, 0x83);
+            let accent_hover = Color32::from_rgb(0xEC, 0xD8, 0x9F);
+            let accent_active = Color32::from_rgb(0xC9, 0xB0, 0x66);
+            let resp = ui.scope(|ui| {
+                let v = &mut ui.style_mut().visuals;
+                v.widgets.inactive.bg_stroke = Stroke::new(1.5, accent);
+                v.widgets.hovered.bg_stroke = Stroke::new(1.5, accent_hover);
+                v.widgets.active.bg_stroke = Stroke::new(1.5, accent_active);
+                let cb = egui::Checkbox::new(&mut all_checked, label).indeterminate(indeterminate);
+                ui.add_enabled(n_total > 0, cb)
+            }).inner;
+            if resp.changed() {
+                if all_checked {
+                    for r in self.results_list.iter_mut() {
+                        if !r.visible {
+                            r.visible = true;
+                            r.selection_order = Some(self.next_selection_rank);
+                            self.next_selection_rank = self.next_selection_rank.wrapping_add(1);
+                        }
+                    }
+                } else {
+                    for r in self.results_list.iter_mut() {
+                        if r.visible {
+                            r.visible = false;
+                            r.selection_order = None;
+                        }
+                    }
+                }
+            }
+        }
+
         ui.add_space(2.0);
 
         // Global diameter range, used to keep histogram axes consistent across cards.
@@ -1775,8 +1818,13 @@ impl AppState {
         });
         ui.add_space(4.0);
 
-        ui.vertical_centered(|ui| {
-            let btn_w = (ui.available_width() * 0.7).clamp(140.0, 240.0);
+        ui.horizontal(|ui| {
+            let cog_w = 32.0_f32;
+            let gap = 6.0_f32;
+            let row_w = ui.available_width();
+            let btn_w = (row_w * 0.7).clamp(140.0, 240.0);
+            let pad = ((row_w - btn_w - cog_w - gap) / 2.0).max(0.0);
+            ui.add_space(pad);
             ui.scope(|ui| {
                 let visuals = &mut ui.style_mut().visuals;
                 visuals.widgets.inactive.weak_bg_fill = accent;
@@ -1793,20 +1841,24 @@ impl AppState {
                     self.export_visible_results();
                 }
             });
-            ui.add_space(6.0);
-        });
-        ui.horizontal(|ui| {
-            let approx_row_w = 170.0;
-            let pad = ((ui.available_width() - approx_row_w) / 2.0).max(0.0);
-            ui.add_space(pad);
+            ui.add_space(gap);
             ui.scope(|ui| {
                 let visuals = &mut ui.style_mut().visuals;
                 visuals.widgets.inactive.bg_stroke = Stroke::new(1.5, accent);
                 visuals.widgets.hovered.bg_stroke = Stroke::new(1.5, accent_hover);
                 visuals.widgets.active.bg_stroke = Stroke::new(1.5, accent_active);
-                ui.checkbox(&mut self.export_csv, "csv");
-                ui.checkbox(&mut self.export_png, "png");
-                ui.checkbox(&mut self.export_hist, "hist");
+                let cog = egui::Button::new(egui::RichText::new("⚙").size(16.0))
+                    .min_size(Vec2::new(cog_w, 38.0));
+                let (resp, _) = egui::containers::menu::MenuButton::from_button(cog)
+                    .ui(ui, |ui| {
+                        ui.set_min_width(140.0);
+                        ui.label(egui::RichText::new("Export contents").small().weak());
+                        ui.separator();
+                        ui.checkbox(&mut self.export_csv, "csv");
+                        ui.checkbox(&mut self.export_png, "png");
+                        ui.checkbox(&mut self.export_hist, "hist");
+                    });
+                resp.on_hover_text("Export settings");
             });
         });
         ui.add_space(16.0);
