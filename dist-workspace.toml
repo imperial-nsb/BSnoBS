@@ -10,9 +10,10 @@ ci = "github"
 # The installers to generate for each app
 installers = []
 # Target platforms to build apps for (Rust target-triple syntax).
-# aarch64-unknown-linux-gnu was dropped: the prebuilt ONNX Runtime for ARM is built
-# against a newer libstdc++ than the runner image has, so libort_sys fails to link.
-targets = ["aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
+# aarch64-unknown-linux-gnu dropped: prebuilt ONNX Runtime for ARM is built
+# against a newer libstdc++ than the runner image has → libort_sys fails to link.
+# x86_64-apple-darwin dropped: no longer supporting Intel Macs.
+targets = ["aarch64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
 # Link against the dynamic CRT on Windows. The prebuilt ONNX Runtime expects
 # msvcrt/ucrt (dynamic); with the default static CRT, libort_sys produces dozens
 # of unresolved __imp_strtof / __imp_iswalpha / etc. linker errors.
