@@ -45,8 +45,6 @@ src/
                      draw_overlays (bubble circles + edit hover marks).
     export_panel.rs  export_visible_results (per-sample CSV/PNG/hist + combined files),
                      write_metadata, open_in_file_manager.
-    updater_ui.rs    drain_updater, update_status_widget (status-bar right corner),
-                     update_modals (Update available + Update installed dialogs).
   inference.rs       letterbox → ort Session → decode → class-agnostic NMS
   static_filter.rs   cross-frame persistent-detection rejection
   exporter.rs        CSV + JSON writers, PNG overlay + histogram rasterizers (imageproc + ab_glyph)

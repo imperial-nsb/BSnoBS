@@ -3,7 +3,6 @@ mod model;
 mod results;
 mod run;
 mod settings;
-mod updater_ui;
 mod viewer;
 mod workspace;
 
@@ -17,7 +16,6 @@ use eframe::egui::{self, TextureHandle, Vec2};
 use crate::inference::{Device, StudentAnalyzer, INPUT_SIZE};
 use crate::static_filter::StaticFilterConfig;
 use crate::types::AnalysisParameters;
-use crate::updater::UpdateUi;
 
 use results::{HistMode, ResultEntry};
 use run::{RunProgress, WorkerMsg};
@@ -83,12 +81,6 @@ pub struct AppState {
     progress: RunProgress,
     status: String,
     start_time: Instant,
-
-    // Updater
-    updater: UpdateUi,
-    updater_auto_checked: bool,
-    show_update_modal: bool,
-    show_restart_modal: bool,
 }
 
 // -------------------------------------------------------------------
@@ -165,11 +157,6 @@ impl AppState {
             progress: RunProgress::default(),
             status: "Add folders to your workspace to begin.".into(),
             start_time: Instant::now(),
-
-            updater: UpdateUi::default(),
-            updater_auto_checked: false,
-            show_update_modal: false,
-            show_restart_modal: false,
         };
         s.last_settings = Some(s.snapshot_settings());
 
@@ -219,11 +206,6 @@ impl eframe::App for AppState {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.drain_worker(ctx);
         self.drain_model_load(ctx);
-        self.drain_updater(ctx);
-        if !self.updater_auto_checked {
-            self.updater_auto_checked = true;
-            self.updater.check();
-        }
         if self.model_loading {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
@@ -284,15 +266,8 @@ impl eframe::App for AppState {
 
         // Status bar
         egui::TopBottomPanel::bottom("statusbar").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(&self.status);
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    self.update_status_widget(ui);
-                });
-            });
+            ui.label(&self.status);
         });
-
-        self.update_modals(ctx);
 
         egui::CentralPanel::default().show(ctx, |ui| {
             self.center_panel(ui, ctx);
