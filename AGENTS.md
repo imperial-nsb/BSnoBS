@@ -23,7 +23,30 @@ assets/student.onnx  bundled via include_bytes! (do not move/rename without
                      updating inference.rs::BUNDLED_WEIGHTS)
 src/
   main.rs            eframe entry; window size; AppState::new
-  app.rs             ★ The whole UI. Big file (~1.1k LOC) — read this first.
+  app.rs             AppState struct + ::new + eframe::App::update orchestration.
+                     The struct is flat (every field is a peer on AppState); each
+                     submodule under app/ adds an `impl AppState { … }` block
+                     of methods scoped to one concern.
+  app/
+    settings.rs      SavedDefaults persistence, SettingsSnapshot (change detection),
+                     Model/Detection/Physics/Static collapsing sections, controls_bar
+                     (the bottom strip of the left panel).
+    model.rs         resolve_device, bundled_weights, start_model_load (worker thread),
+                     drain_model_load, show_loading_overlay, pick_weights, reset_weights.
+    workspace.rs     WorkspaceEntry tree, build_workspace_entry (folder walk),
+                     add_folder (rfd picker), workspace_panel rendering.
+    run.rs           WorkerMsg / RunProgress, start_run (spawns inference worker and
+                     moves the analyzer onto it), drain_worker, RUN button.
+    results.rs       ResultEntry, HistMode, focused_results, draw_mini_histogram,
+                     results_panel (the whole right panel: viewer checkboxes, select-all,
+                     per-stack cards, Export… button + cog menu).
+    viewer.rs        UndoAction, ensure_frame_texture (cached image upload),
+                     center_panel (zoom/pan/edit-mode/slider/keyboard nav),
+                     draw_overlays (bubble circles + edit hover marks).
+    export_panel.rs  export_visible_results (per-sample CSV/PNG/hist + combined files),
+                     write_metadata, open_in_file_manager.
+    updater_ui.rs    drain_updater, update_status_widget (status-bar right corner),
+                     update_modals (Update available + Update installed dialogs).
   inference.rs       letterbox → ort Session → decode → class-agnostic NMS
   static_filter.rs   cross-frame persistent-detection rejection
   exporter.rs        CSV + JSON writers, PNG overlay + histogram rasterizers (imageproc + ab_glyph)
@@ -32,7 +55,7 @@ src/
 
 ## Architecture in one paragraph
 
-`AppState` (in `src/app.rs`) owns everything: model (`StudentAnalyzer`), settings, `workspace: Vec<WorkspaceEntry>`, `results_list: Vec<ResultEntry>`, viewer state, and the worker-thread `mpsc::Receiver`. The eframe `update()` drains the worker channel, draws four panels (left split into Settings + Workspace, right = Viewer + Results, center = image + slider, bottom = status), and re-requests repaint while work is in flight. Inference runs on `std::thread::spawn`'d workers — the analyzer is **moved onto the thread and sent back via the `Done` message** so we never reload it.
+`AppState` (in `src/app.rs`) owns everything as one flat struct: model (`StudentAnalyzer`), settings, `workspace: Vec<WorkspaceEntry>`, `results_list: Vec<ResultEntry>`, viewer state, and the worker-thread `mpsc::Receiver`. The struct lives in `app.rs`; its methods are distributed across `src/app/*.rs` submodules (each adds an `impl AppState { … }` block — submodules see the private fields because they are children of `app`). The eframe `update()` in `app.rs` drains the worker channel, draws four panels (left split into Settings + Workspace, right = Viewer + Results, center = image + slider, bottom = status), and re-requests repaint while work is in flight. Inference runs on `std::thread::spawn`'d workers — the analyzer is **moved onto the thread and sent back via the `Done` message** so we never reload it.
 
 ## UI layout (left → right)
 
