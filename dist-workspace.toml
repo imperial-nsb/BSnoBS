@@ -18,3 +18,9 @@ targets = ["aarch64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-pc-window
 # msvcrt/ucrt (dynamic); with the default static CRT, libort_sys produces dozens
 # of unresolved __imp_strtof / __imp_iswalpha / etc. linker errors.
 msvc-crt-static = false
+
+# cargo-dist 0.28.7 defaults aarch64-apple-darwin to macos-13 (Intel) which
+# cross-compiles slowly and has a heavily backed-up runner queue. macos-14 is
+# Apple Silicon native — native build, much shorter queue.
+[dist.github-custom-runners]
+aarch64-apple-darwin = "macos-14"
